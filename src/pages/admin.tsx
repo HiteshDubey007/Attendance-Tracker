@@ -121,6 +121,7 @@ export function PeoplePage() {
   const members = useLoad(() => backend.members(), []);
   const { me } = useApp(); const toast = useToast();
   const [adding, setAdding] = useState(false); const [editing, setEditing] = useState<Member | null>(null);
+  const [code, setCode] = useState<{ who: string; code: string } | null>(null);
   const [q, setQ] = useState('');
   const list = (members.data ?? []).filter(m => (m.nickname + m.email).toLowerCase().includes(q.toLowerCase()));
   return <>
@@ -133,7 +134,7 @@ export function PeoplePage() {
             <div className="avatar" style={m.status !== 'active' ? { background: 'var(--canvas)', color: 'var(--muted)' } : undefined}>{m.nickname[0]?.toUpperCase()}</div>
             <div className="grow">
               <div className="ttl">{m.nickname} {m.role === 'admin' && <span className="tag">Admin</span>}</div>
-              <div className="sub">{m.email} · {m.user_id ? 'Account set up' : 'Invited — hasn’t signed up yet'}</div>
+              <div className="sub">{m.email}{m.user_id !== undefined && <> · {m.user_id ? 'Account set up' : 'Invited — hasn’t signed up yet'}</>}</div>
             </div>
             <div className="right row" style={{ gap: 8 }}>
               {m.status !== 'active' && <StatusPill s={m.status} />}
@@ -143,14 +144,30 @@ export function PeoplePage() {
           </div>))}</div>
         {!list.length && !members.loading && <Empty title="Nobody here">Add people by their office email.</Empty>}
       </section>
-      <div className="note info"><Icon n="alert" />After you add someone, they open this app, tap “First time? Set up your account”, and use the same email to choose a password. Nobody else can sign up.</div>
+      <div className="note info"><Icon n="alert" />{backend.usesCodes ? 'When you add someone you get an 8-letter code. They open PunchIn, tap “First time or forgot password?”, and enter their email, the code and a new password. Codes work once and expire in 14 days.' : 'After you add someone, they open this app, tap “First time? Set up your account”, and use the same email to choose a password. Nobody else can sign up.'}</div>
     </div>
-    {adding && <AddPerson onClose={() => setAdding(false)} onDone={() => { setAdding(false); members.reload(); toast('Person added. Ask them to set up their account.'); }} />}
-    {editing && <EditPerson m={editing} onClose={() => setEditing(null)} onDone={msg => { setEditing(null); members.reload(); toast(msg); }} />}
+    {adding && <AddPerson onClose={() => setAdding(false)} onDone={(who, c) => { setAdding(false); members.reload(); c ? setCode({ who, code: c }) : toast('Person added. Ask them to set up their account.'); }} />}
+    {editing && <EditPerson m={editing} onClose={() => setEditing(null)} onCode={c => { setEditing(null); setCode({ who: editing.nickname, code: c }); }} onDone={msg => { setEditing(null); members.reload(); toast(msg); }} />}
+    {code && <CodeCard who={code.who} code={code.code} onClose={() => setCode(null)} />}
   </>;
 }
 
-function AddPerson({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+function CodeCard({ who, code, onClose }: { who: string; code: string; onClose: () => void }) {
+  const toast = useToast();
+  const text = `PunchIn: your sign-in code is ${code}. Open ${location.href.split('#')[0]} → “First time or forgot password?”, use your office email, this code and a new password. The code expires in 14 days.`;
+  return (
+    <Modal title={`Code for ${who}`} lede="Share it privately (WhatsApp, in person). It works once and expires in 14 days." onClose={onClose}>
+      <div className="display num" style={{ fontSize: 40, fontWeight: 800, letterSpacing: '.18em', textAlign: 'center', padding: '18px 0', background: 'var(--orange-wash)', borderRadius: 16, color: 'var(--orange-ink)', marginBottom: 16 }}>{code}</div>
+      <div className="row end">
+        <button className="btn ghost" onClick={() => { navigator.clipboard?.writeText(text).then(() => toast('Message copied')); }}>Copy message</button>
+        <a className="btn primary" href={`https://wa.me/?text=${encodeURIComponent(text)}`} target="_blank" rel="noreferrer">Send on WhatsApp</a>
+      </div>
+      <p className="small muted" style={{ marginTop: 14 }}>This code is not shown again. If it’s lost, open the person and tap “New sign-in code”.</p>
+    </Modal>
+  );
+}
+
+function AddPerson({ onClose, onDone }: { onClose: () => void; onDone: (who: string, code: string | null) => void }) {
   const [email, setEmail] = useState(''); const [nick, setNick] = useState(''); const [role, setRole] = useState<Role>('employee');
   return (
     <Modal title="Add a person" lede="They’ll be able to create their account with this email." onClose={onClose}>
@@ -158,19 +175,21 @@ function AddPerson({ onClose, onDone }: { onClose: () => void; onDone: () => voi
       <label className="field"><span>Nickname</span><input className="input" maxLength={40} value={nick} onChange={e => setNick(e.target.value)} placeholder="Shown across the app" /></label>
       <label className="field"><span>Role</span><select className="input" value={role} onChange={e => setRole(e.target.value as Role)}><option value="employee">Employee</option><option value="admin">Admin (sees everyone, approves requests)</option></select></label>
       <div className="row end"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <Busy run={async () => { await backend.addMember(email, nick, role); onDone(); }} disabled={!/\S+@\S+\.\S+/.test(email) || !nick.trim()}>Add person</Busy></div>
+        <Busy run={async () => { const c = await backend.addMember(email, nick, role); onDone(nick, c); }} disabled={!/\S+@\S+\.\S+/.test(email) || !nick.trim()}>Add person</Busy></div>
     </Modal>
   );
 }
 
-function EditPerson({ m, onClose, onDone }: { m: Member; onClose: () => void; onDone: (msg: string) => void }) {
+function EditPerson({ m, onClose, onDone, onCode }: { m: Member; onClose: () => void; onDone: (msg: string) => void; onCode: (code: string) => void }) {
   const [nick, setNick] = useState(m.nickname); const [role, setRole] = useState<Role>(m.role); const [confirmDel, setConfirmDel] = useState(false);
   const save = (status: MemberStatus, msg: string) => async () => { await backend.updateMember(m.id, nick, role, status); onDone(msg); };
   return (
     <Modal title={`Edit ${m.nickname}`} lede={m.email} onClose={onClose}>
       <label className="field"><span>Nickname</span><input className="input" maxLength={40} value={nick} onChange={e => setNick(e.target.value)} /></label>
       <label className="field"><span>Role</span><select className="input" value={role} onChange={e => setRole(e.target.value as Role)}><option value="employee">Employee</option><option value="admin">Admin</option></select></label>
-      <div className="row end" style={{ marginBottom: 18 }}><Busy run={save(m.status, 'Saved')}>Save changes</Busy></div>
+      <div className="row between" style={{ marginBottom: 18 }}>
+        {backend.usesCodes ? <Busy className="btn ghost" run={async () => onCode(await backend.resetCode(m.id))}>New sign-in code</Busy> : <span />}
+        <Busy run={save(m.status, 'Saved')}>Save changes</Busy></div>
       <div style={{ borderTop: '1px solid var(--line)', paddingTop: 16 }} className="row between">
         {m.status === 'blocked'
           ? <Busy className="btn good" run={save('active', `${m.nickname} unblocked`)}>Unblock</Busy>

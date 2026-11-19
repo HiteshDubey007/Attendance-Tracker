@@ -14,7 +14,7 @@
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
     "noEmit": true,
-    "paths": { "@backend": ["./src/lib/backend.supabase.ts"] },
+    "paths": { "@backend": ["./src/lib/backend.live.ts"] },
     "jsx": "react-jsx",
 
     /* Linting */

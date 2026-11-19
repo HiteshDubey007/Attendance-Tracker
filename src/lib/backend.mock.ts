@@ -58,6 +58,7 @@ const mine = <T extends { member_id: string }>(xs: T[], m?: string) => xs.filter
 export async function initBackend() { return true; }
 export const backend: Backend = {
   configured: true,
+  usesCodes: true,
   onAuth(cb) { const signedIn = !location.search.includes('signedout'); setTimeout(() => cb(signedIn)); return () => {}; },
   signIn: async () => {}, signUp: async () => {}, resetPassword: async () => {}, signOut: async () => {},
   me: () => wait(me), settings: () => wait(settings), serverTime: () => wait(ist(TODAY, 600)),
@@ -74,7 +75,7 @@ export const backend: Backend = {
   leaves: (m) => wait(mine(leaves, m)), requestLeave: async () => {}, cancelLeave: async () => {},
   corrections: (m) => wait(mine(corrections, m)), requestCorrection: async () => {},
   holidays: () => wait(holidays),
-  members: () => wait(members), addMember: async () => {}, updateMember: async () => {},
+  members: () => wait(members), addMember: async () => 'K7QM4XPA', resetCode: async () => 'R2TW9HNE', updateMember: async () => {},
   teamDay: () => wait(members.filter(m => m.status === 'active').map((m, i) => {
     const d = makeDays(m.id, TODAY, TODAY)[0];
     const kind = (['working', 'working', 'not_yet', 'working', 'leave', 'working', 'working'] as DayKind[])[i] ?? 'working';

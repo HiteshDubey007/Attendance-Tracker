@@ -59,9 +59,11 @@ export interface GeoFix { lat: number; lng: number; accuracy: number }
 
 export interface Backend {
   configured: boolean;
+  /** true when first sign-up / password reset needs a one-time code from the admin */
+  usesCodes: boolean;
   onAuth(cb: (signedIn: boolean) => void): () => void;
   signIn(email: string, password: string): Promise<void>;
-  signUp(email: string, password: string): Promise<void>;
+  signUp(email: string, password: string, code?: string): Promise<void>;
   resetPassword(email: string): Promise<void>;
   signOut(): Promise<void>;
   me(): Promise<Member | null>;
@@ -80,7 +82,8 @@ export interface Backend {
   holidays(): Promise<Holiday[]>;
 
   members(): Promise<Member[]>;
-  addMember(email: string, nickname: string, role: Role): Promise<void>;
+  addMember(email: string, nickname: string, role: Role): Promise<string | null>;
+  resetCode(id: string): Promise<string>;
   updateMember(id: string, nickname: string, role: Role, status: MemberStatus): Promise<void>;
   teamDay(day?: string): Promise<TeamRow[]>;
   teamTrend(from: string, to: string): Promise<TrendRow[]>;

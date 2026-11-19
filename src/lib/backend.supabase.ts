@@ -3,16 +3,10 @@ import type { Backend, Settings } from './types';
 
 let sb: SupabaseClient | null = null;
 
-/** Loads public/config.json (Supabase URL + public anon key). Safe to be public: all data is protected by row-level security. */
-export async function initBackend(): Promise<boolean> {
-  try {
-    const cfg = await (await fetch('./config.json', { cache: 'no-store' })).json();
-    if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
-      sb = createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true } });
-      backend.configured = true;
-    }
-  } catch { /* stays unconfigured */ }
-  return backend.configured;
+/** Connects with the Supabase URL + public anon key. Safe to be public: all data is protected by row-level security. */
+export function initSupabase(url: string, key: string) {
+  sb = createClient(url, key, { auth: { persistSession: true, autoRefreshToken: true } });
+  supabaseBackend.configured = true;
 }
 
 const c = () => { if (!sb) throw new Error('App is not connected to a database yet'); return sb; };
@@ -40,8 +34,9 @@ async function q<T>(p: PromiseLike<{ data: any; error: any }>): Promise<T> {
 const one = <T,>(rows: T[] | T): T => (Array.isArray(rows) ? rows[0] : rows);
 const num = <T extends object>(o: T): T => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v])) as T;
 
-export const backend: Backend = {
+export const supabaseBackend: Backend = {
   configured: false,
+  usesCodes: false,
   onAuth(cb) {
     if (!sb) return () => {};
     sb.auth.getSession().then(({ data }) => cb(!!data.session));
@@ -87,7 +82,8 @@ export const backend: Backend = {
   holidays: () => q(c().from('holidays').select('*').order('holiday_date')),
 
   members: () => q(c().from('members').select('*').neq('status', 'deleted').order('nickname')),
-  async addMember(email, nickname, role) { await rpc('admin_add_member', { p_email: email, p_nickname: nickname, p_role: role }); },
+  async addMember(email, nickname, role) { await rpc('admin_add_member', { p_email: email, p_nickname: nickname, p_role: role }); return null; },
+  async resetCode() { throw new Error('Ask the person to use “Forgot password” on the sign-in screen.'); },
   async updateMember(id, nickname, role, status) { await rpc('admin_update_member', { p_id: id, p_nickname: nickname, p_role: role, p_status: status }); },
   teamDay: (day) => rpc('team_day', { p_day: day ?? null }),
   teamTrend: (from, to) => rpc('team_trend', { p_from: from, p_to: to }),

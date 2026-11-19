@@ -24,13 +24,14 @@ function Splash() { return <div className="center-screen"><div className="spinne
 function SetupNeeded() {
   return <div className="center-screen"><div className="card" style={{ maxWidth: 460 }}>
     <h2>PunchIn is almost ready</h2>
-    <p className="muted">This copy is not connected to its database yet. The administrator needs to finish the setup steps in the project’s README (add the Supabase address and public key to <code>config.json</code>).</p>
+    <p className="muted">This copy is not connected to its database yet. The administrator needs to finish the set-up steps in the project’s README (put the Google Apps Script web-app link in <code>config.json</code>).</p>
   </div></div>;
 }
 
 function AuthScreen() {
   const [mode, setMode] = useState<'in' | 'up' | 'reset'>('in');
-  const [email, setEmail] = useState(''); const [pw, setPw] = useState(''); const [pw2, setPw2] = useState('');
+  const [email, setEmail] = useState(''); const [pw, setPw] = useState(''); const [pw2, setPw2] = useState(''); const [code, setCode] = useState('');
+  const codes = backend.usesCodes;
   const [msg, setMsg] = useState<{ t: string; ok?: boolean } | null>(null); const [busy, setBusy] = useState(false);
   async function submit(e: FormEvent) {
     e.preventDefault(); setMsg(null);
@@ -39,7 +40,7 @@ function AuthScreen() {
     setBusy(true);
     try {
       if (mode === 'in') await backend.signIn(email, pw);
-      else if (mode === 'up') await backend.signUp(email, pw);
+      else if (mode === 'up') await backend.signUp(email, pw, code);
       else { await backend.resetPassword(email); setMsg({ t: 'Reset link sent. Check your inbox.', ok: true }); }
     } catch (err: any) { setMsg({ t: err.message, ok: /Account created/.test(err.message) }); }
     setBusy(false);
@@ -54,17 +55,18 @@ function AuthScreen() {
       </div>
       <div className="auth-form">
         <form onSubmit={submit}>
-          <h1>{mode === 'in' ? 'Sign in' : mode === 'up' ? 'First time here' : 'Reset password'}</h1>
-          <p className="muted" style={{ marginBottom: 22 }}>{mode === 'up' ? 'Use the office email your admin added, and choose a password.' : mode === 'reset' ? 'We’ll email you a link to set a new password.' : 'Use your office email.'}</p>
+          <h1>{mode === 'in' ? 'Sign in' : mode === 'up' ? (codes ? 'Set your password' : 'First time here') : 'Reset password'}</h1>
+          <p className="muted" style={{ marginBottom: 22 }}>{mode === 'up' ? (codes ? 'Use your office email and the 8-letter code your admin gave you. Works for first sign-in and for a forgotten password.' : 'Use the office email your admin added, and choose a password.') : mode === 'reset' ? 'We’ll email you a link to set a new password.' : 'Use your office email.'}</p>
           <label className="field"><span>Office email</span><input className="input" type="email" autoComplete="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" /></label>
-          {mode !== 'reset' && <label className="field"><span>Password</span><input className="input" type="password" autoComplete={mode === 'up' ? 'new-password' : 'current-password'} required value={pw} onChange={e => setPw(e.target.value)} /></label>}
+          {mode === 'up' && codes && <label className="field"><span>Code from your admin</span><input className="input" required autoComplete="one-time-code" autoCapitalize="characters" value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder="e.g. K7QM4XPA" style={{ letterSpacing: '.12em', fontWeight: 700 }} /></label>}
+          {mode !== 'reset' && <label className="field"><span>{mode === 'up' ? 'New password' : 'Password'}</span><input className="input" type="password" autoComplete={mode === 'up' ? 'new-password' : 'current-password'} required value={pw} onChange={e => setPw(e.target.value)} /></label>}
           {mode === 'up' && <label className="field"><span>Repeat password</span><input className="input" type="password" autoComplete="new-password" required value={pw2} onChange={e => setPw2(e.target.value)} /></label>}
           {msg && <div className={`note ${msg.ok ? 'good' : 'bad'}`} style={{ marginBottom: 14 }}>{msg.t}</div>}
           <button className="btn primary block" disabled={busy}>{busy ? 'Please wait…' : mode === 'in' ? 'Sign in' : mode === 'up' ? 'Create my account' : 'Send reset link'}</button>
           <div className="row between" style={{ marginTop: 16 }}>
-            {mode === 'in' ? <button type="button" className="linkbtn" onClick={() => setMode('up')}>First time? Set up your account</button>
+            {mode === 'in' ? <button type="button" className="linkbtn" onClick={() => setMode('up')}>{codes ? 'First time or forgot password?' : 'First time? Set up your account'}</button>
               : <button type="button" className="linkbtn" onClick={() => setMode('in')}>Back to sign in</button>}
-            {mode === 'in' && <button type="button" className="linkbtn" onClick={() => setMode('reset')}>Forgot password</button>}
+            {mode === 'in' && !codes && <button type="button" className="linkbtn" onClick={() => setMode('reset')}>Forgot password</button>}
           </div>
         </form>
       </div>

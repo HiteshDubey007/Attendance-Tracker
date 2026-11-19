@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => ({
   base: './',
   resolve: {
     alias: {
-      '@backend': fileURLToPath(new URL(mode === 'mock' ? './src/lib/backend.mock.ts' : './src/lib/backend.supabase.ts', import.meta.url)),
+      '@backend': fileURLToPath(new URL(mode === 'mock' ? './src/lib/backend.mock.ts' : './src/lib/backend.live.ts', import.meta.url)),
     },
   },
   plugins: [

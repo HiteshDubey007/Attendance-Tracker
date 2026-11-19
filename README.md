@@ -28,40 +28,52 @@ Check-in / check-out, leave, holidays and reports for a small office. Installs o
 - Export any month for everyone to CSV (opens in Excel / Google Sheets)
 - Security page: refused punches (outside office, location off, poor GPS) and a one-click integrity check of the full history
 
+## Where the data lives
+
+Two free options; the app picks whichever is filled in `public/config.json`.
+
+- **Google Sheets + Apps Script (default, free, nothing to sign up for beyond a Google account)** — code in [`gas/Code.js`](gas/Code.js). The sheet is never shared; only the script, running as the owner, touches it.
+- **Supabase (PostgreSQL)** — code in [`supabase/schema.sql`](supabase/schema.sql), for when the team grows.
+
 ## Why it is hard to cheat
 
 | Threat | Protection |
 |---|---|
-| Changing the phone clock | Every time is stamped by the database server, never the phone |
-| Editing data in the browser / calling the API by hand | Users have **no write access** to any table. Every change goes through server functions that check who is calling and what is allowed |
-| Seeing other people's data | Row-level security: an employee can only ever read their own rows |
-| Strangers signing up | Sign-up is refused unless the admin added that email first |
-| Punching from home | Server-side geofence; distance and GPS accuracy checked; every refused attempt is logged for the admin |
-| Quietly changing history | Every insert / update / delete on every table goes into an append-only audit log. Each entry is SHA-256 chained to the previous one, so any later edit — even directly in the database — is detected by **Security → Verify** |
-| Blocked staff still using the app | Blocked / removed accounts are refused by every function |
+| Changing the phone clock | Every time is stamped by Google's / the database's server, never the phone |
+| Editing data or calling the server by hand | Staff never get access to the sheet. Every request goes through server code that checks the signed-in person and what they are allowed to do; times or ids sent by the phone are ignored |
+| Seeing other people's data | The server only ever returns the caller's own records (admins see all) |
+| Strangers signing up / taking over an invited email | Sign-up needs a one-time 8-letter code the admin gets when adding the person (expires in 14 days, works once) |
+| Password guessing | Salted, 2000× hashed passwords; 6 wrong tries locks that email for 15 minutes |
+| Punching from home | Server-side geofence with GPS accuracy check; every refused attempt is logged for the admin |
+| Quietly changing history | Every change goes into an append-only Audit tab, SHA-256 chained. **Security → Verify** also replays the log against the live tabs, so even the owner editing a cell in the sheet by hand is detected and the row is named |
+| Blocked staff | Blocking ends all their sessions immediately |
 
-Honest limits: a web app cannot detect "fake GPS" apps on rooted phones. Distances and refused attempts are recorded so unusual patterns stand out. Selfie-at-punch or a native app with mock-location detection can be added later if needed.
+Honest limits: a web app cannot detect "fake GPS" apps on rooted phones. Distances and refused attempts are recorded so unusual patterns stand out.
 
 ## Testing and back-testing
 
-Every push to GitHub runs all of this automatically before the app is published (see the Actions tab):
+Every push runs all of this before the app is published (GitHub → Actions):
 
-- **Security tests** (32) against a real PostgreSQL: forged writes, privilege escalation, reading other people's data, anonymous access, geofence edge cases, blocking, leave rules, audit tampering.
-- **Back-test**: replays **six months** of office life (Jan–Jun 2026) for 10 + 8 employees in two configurations (5-day / 9 h and 6-day / 8 h) — ~4,500 punches, leave requests, approvals, rejections, half days, forgotten check-outs, fix requests, admin edits, weekend work and holidays — through the real database functions. An independent model computes what every monthly report and leave balance *should* be; all 108 monthly reports must match exactly and the audit chain must verify.
-- **Logic tests**: the app's own leave-day preview and distance math are checked against the database on 300 random date ranges.
-- **Screen tests**: every screen opened on a phone size and a laptop size; fails on any error or sideways scrolling; screenshots saved as a build artifact.
+- **Security tests** — 32 against PostgreSQL and 31 against the Google Sheets code: forged requests, fake tokens, privilege escalation, reading other people's data, invite-code reuse, password guessing, geofence edge cases, blocking, leave rules, and tampering with the sheet.
+- **Back-test** — replays **six months** of office life (Jan–Jun 2026) for 10 + 8 employees in two set-ups (5-day / 9 h and 6-day / 8 h): ~4,500 check-ins, leave requests, approvals, rejections, half days, forgotten check-outs, fixes, admin edits, weekend work and holidays — through **both** backends. An independent model computes what every monthly report and leave balance should be; all 108 monthly reports must match exactly and the audit must verify.
+- **Logic tests** — the leave-day preview and distance maths checked against the database on 300 random ranges.
+- **Screen tests** — all 14 screens on phone and laptop sizes.
+- **End-to-end** — the real built app in Chrome talking to the real Sheets code over HTTP: admin set-up, adding a person, wrong code refused, employee sign-up and check-in, employee blocked from admin screens, admin sees the check-in.
 
-Run locally: `npm test` (needs PostgreSQL), `npm run build:mock && npm run test:ui`.
+## One-time setup with Google Sheets (≈10 minutes, free)
 
-## One-time setup (≈10 minutes, no coding)
+1. Open [sheets.new](https://sheets.new) with your Google account. Name it **PunchIn data**.
+2. **Extensions → Apps Script**. Delete what is there, paste all of [`gas/Code.js`](gas/Code.js), press **Save**.
+3. Choose the **setup** function at the top and press **Run**. Allow the permissions it asks for (it only touches this sheet). Copy the **set-up code** it shows.
+4. **Deploy → New deployment →** type **Web app** · Execute as **Me** · Who has access **Anyone** → **Deploy**. Copy the **Web app URL** (ends in `/exec`).
+5. Put that URL in [`public/config.json`](public/config.json) as `"appsScriptUrl"`.
+6. In this GitHub repo: **Settings → Pages → Source: GitHub Actions**. The app goes live at `https://hiteshdubey007.github.io/attendance-tracker/`.
+7. Open the app → **First time or forgot password?** → your email + the set-up code + a password. You are now the admin. Add people in **People**; each gets a code to share on WhatsApp.
+8. Install on phones — Android (Chrome): ⋮ → *Install app*. iPhone (Safari): Share → *Add to Home Screen*.
 
-1. **Create the database** — go to [supabase.com](https://supabase.com), sign up (free), click **New project**. Name it `punchin`, pick region **Mumbai (ap-south-1)**, set a database password and save it somewhere safe.
-2. **Install the tables** — in the project open **SQL Editor → New query**, paste the whole of [`supabase/schema.sql`](supabase/schema.sql), press **Run**. It should say *Success*.
-3. **Let invited staff sign up instantly** — **Authentication → Sign In / Providers → Email**: turn **off** "Confirm email", save. (Only emails you add in the app can sign up.)
-4. **Connect the app** — **Project Settings → API**: copy the **Project URL** and the **anon / publishable key**. Put them in [`public/config.json`](public/config.json) (or send them to whoever maintains the repo). Both are designed to be public; never share the *service_role* / secret key.
-5. **Publish** — in this GitHub repo: **Settings → Pages → Source: GitHub Actions**. The next push publishes the app at `https://hiteshdubey007.github.io/attendance-tracker/`.
-6. **Become admin** — open the app, tap **First time? Set up your account**, and sign up with *your* email **first**. The first account becomes the admin. Then go to **People → Add person** for each employee.
-7. **Install on phones** — Android (Chrome): ⋮ → *Install app*. iPhone (Safari): Share → *Add to Home Screen*.
+Updating the server code later: paste the new `Code.js`, then **Deploy → Manage deployments → ✎ → Version: New version → Deploy** (the URL stays the same).
+
+Free Google limits are far above what a small office needs: up to 30 people can use it at the same moment, and a sheet holds 10 million cells — over 100 years of records for a 20-person office.
 
 ## Tech
 
