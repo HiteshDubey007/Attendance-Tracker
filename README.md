@@ -67,7 +67,7 @@ Every push runs all of this before the app is published (GitHub → Actions):
 3. Choose the **setup** function at the top and press **Run**. Allow the permissions it asks for (it only touches this sheet). Copy the **set-up code** it shows.
 4. **Deploy → New deployment →** type **Web app** · Execute as **Me** · Who has access **Anyone** → **Deploy**. Copy the **Web app URL** (ends in `/exec`).
 5. Put that URL in [`public/config.json`](public/config.json) as `"appsScriptUrl"`.
-6. In this GitHub repo: **Settings → Pages → Source: GitHub Actions**. The app goes live at `https://hiteshdubey007.github.io/attendance-tracker/`.
+6. In this GitHub repo: **Settings → Pages → Source: GitHub Actions**. The app goes live at `https://hiteshdubey007.github.io/Attendance-Tracker/`.
 7. Open the app → **First time or forgot password?** → your email + the set-up code + a password. You are now the admin. Add people in **People**; each gets a code to share on WhatsApp.
 8. Install on phones — Android (Chrome): ⋮ → *Install app*. iPhone (Safari): Share → *Add to Home Screen*.
 
