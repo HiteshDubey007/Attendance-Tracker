@@ -1,72 +1,83 @@
-import { createContext, useContext, useEffect, useState, type FormEvent } from 'react';
-import { HashRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { createContext, useCallback, useContext, useEffect, useState, type FormEvent } from 'react';
+import { HashRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { backend } from '@backend';
-import type { Member, Settings } from './lib/types';
-import { dateInTz } from './lib/time';
-import { Icon, ToastProvider, useLoad } from './ui';
-import { TodayPage, HistoryPage, LeavePage, FixesPage, MePage } from './pages/employee';
+import type { Boot } from './lib/types';
+import { Icon, ToastProvider } from './ui';
+import { Bell, InstallSteps, Tour, markSeen, seen, tourKey, type TourStep } from './extras';
+import { TodayPage, HistoryPage, LeavePage, FixesPage, MePage, PrivacyPage, AnnouncePage } from './pages/employee';
 import { OverviewPage, PeoplePage, RecordsPage, ApprovalsPage, HolidaysPage, SettingsPage, SecurityPage, MorePage } from './pages/admin';
 
-interface AppCtx { me: Member; settings: Settings; today: string; reloadSettings: () => void; pending: number; reloadPending: () => void }
+interface AppCtx extends Boot { reload: () => void; startTour: () => void }
 const Ctx = createContext<AppCtx>(null!);
 export const useApp = () => useContext(Ctx);
 
 export default function App() {
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   useEffect(() => backend.onAuth(setSignedIn), []);
+  if (window.top !== window.self) return <div className="framed"><p>PunchIn can’t be opened inside another website. <a href={location.href} target="_top">Open PunchIn</a></p></div>;
   if (!backend.configured) return <SetupNeeded />;
   if (signedIn === null) return <Splash />;
-  return <ToastProvider>{signedIn ? <Session /> : <AuthScreen />}</ToastProvider>;
+  return (
+    <ToastProvider>
+      <HashRouter>
+        <Routes>
+          <Route path="/privacy" element={<div className="page" style={{ maxWidth: 760, margin: '0 auto' }}><PrivacyPage standalone /></div>} />
+          <Route path="/join" element={<JoinPage signedIn={signedIn} />} />
+          <Route path="*" element={signedIn ? <Session /> : <AuthScreen />} />
+        </Routes>
+      </HashRouter>
+    </ToastProvider>
+  );
 }
 
 function Splash() { return <div className="center-screen"><div className="spinner" aria-label="Loading" /></div>; }
-
 function SetupNeeded() {
   return <div className="center-screen"><div className="card" style={{ maxWidth: 460 }}>
-    <h2>PunchIn is almost ready</h2>
-    <p className="muted">This copy is not connected to its database yet. The administrator needs to finish the set-up steps in the project’s README (put the Google Apps Script web-app link in <code>config.json</code>).</p>
+    <h2>PunchIn is almost ready</h2><p className="muted">This copy is not connected to its server yet. See the set-up steps in the project README.</p>
   </div></div>;
 }
 
-function AuthScreen() {
-  const [mode, setMode] = useState<'in' | 'up' | 'reset'>('in');
-  const [email, setEmail] = useState(''); const [pw, setPw] = useState(''); const [pw2, setPw2] = useState(''); const [code, setCode] = useState('');
-  const codes = backend.usesCodes;
-  const [msg, setMsg] = useState<{ t: string; ok?: boolean } | null>(null); const [busy, setBusy] = useState(false);
+function AuthArt() {
+  return (
+    <div className="auth-art">
+      <div className="brand" style={{ padding: 0 }}><img src="./icon.svg" alt="" /><b style={{ color: '#fff' }}>PunchIn</b></div>
+      <div><h2>Your day, on the clock.</h2><p className="hide-m">Check in from the office, see your hours fill up, and handle leave without chasing anyone on chat.</p></div>
+      <span className="hide-m small" style={{ opacity: .85 }}>Times are stamped by the server, not your phone. <a href="#/privacy" style={{ color: '#fff' }}>Privacy</a></span>
+      <svg className="rings" viewBox="0 0 100 100" fill="none" stroke="#fff" strokeWidth="6"><circle cx="50" cy="50" r="44" /><circle cx="50" cy="50" r="28" /></svg>
+    </div>
+  );
+}
+
+function AuthScreen({ initial }: { initial?: { email: string; code: string } }) {
+  const [mode, setMode] = useState<'in' | 'up'>(initial ? 'up' : 'in');
+  const [email, setEmail] = useState(initial?.email ?? ''); const [pw, setPw] = useState(''); const [pw2, setPw2] = useState(''); const [code, setCode] = useState(initial?.code ?? '');
+  const [msg, setMsg] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   async function submit(e: FormEvent) {
     e.preventDefault(); setMsg(null);
-    if (mode === 'up' && pw !== pw2) return setMsg({ t: 'Passwords do not match.' });
-    if (mode !== 'reset' && pw.length < 8) return setMsg({ t: 'Password needs at least 8 characters.' });
+    if (mode === 'up' && pw !== pw2) return setMsg('Passwords do not match.');
+    if (pw.length < 8) return setMsg('Password needs at least 8 characters.');
     setBusy(true);
-    try {
-      if (mode === 'in') await backend.signIn(email, pw);
-      else if (mode === 'up') await backend.signUp(email, pw, code);
-      else { await backend.resetPassword(email); setMsg({ t: 'Reset link sent. Check your inbox.', ok: true }); }
-    } catch (err: any) { setMsg({ t: err.message, ok: /Account created/.test(err.message) }); }
+    try { mode === 'in' ? await backend.signIn(email, pw) : await backend.signUp(email, pw, code); }
+    catch (err: any) { setMsg(err.message); }
     setBusy(false);
   }
   return (
     <div className="auth">
-      <div className="auth-art">
-        <div className="brand" style={{ padding: 0 }}><img src="./icon.svg" alt="" /><b style={{ color: '#fff' }}>PunchIn</b></div>
-        <div><h2>Your day, on the clock.</h2><p className="hide-m">Check in from the office, see your hours fill up, and handle leave without chasing anyone on chat.</p></div>
-        <span className="hide-m small" style={{ opacity: .8 }}>Times are stamped by the server, not your phone.</span>
-        <svg className="rings" viewBox="0 0 100 100" fill="none" stroke="#fff" strokeWidth="6"><circle cx="50" cy="50" r="44" /><circle cx="50" cy="50" r="28" /></svg>
-      </div>
+      <AuthArt />
       <div className="auth-form">
         <form onSubmit={submit}>
-          <h1>{mode === 'in' ? 'Sign in' : mode === 'up' ? (codes ? 'Set your password' : 'First time here') : 'Reset password'}</h1>
-          <p className="muted" style={{ marginBottom: 22 }}>{mode === 'up' ? (codes ? 'Use your office email and the 8-letter code your admin gave you. Works for first sign-in and for a forgotten password.' : 'Use the office email your admin added, and choose a password.') : mode === 'reset' ? 'We’ll email you a link to set a new password.' : 'Use your office email.'}</p>
+          <h1>{mode === 'in' ? 'Sign in' : 'Set your password'}</h1>
+          <p className="muted" style={{ marginBottom: 22 }}>{mode === 'up' ? 'Use your office email and the 8-letter code your admin sent you. Works for first sign-in and for a forgotten password.' : 'Use your office email.'}</p>
           <label className="field"><span>Office email</span><input className="input" type="email" autoComplete="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" /></label>
-          {mode === 'up' && codes && <label className="field"><span>Code from your admin</span><input className="input" required autoComplete="one-time-code" autoCapitalize="characters" value={code} onChange={e => setCode(e.target.value.toUpperCase())} placeholder="e.g. K7QM4XPA" style={{ letterSpacing: '.12em', fontWeight: 700 }} /></label>}
-          {mode !== 'reset' && <label className="field"><span>{mode === 'up' ? 'New password' : 'Password'}</span><input className="input" type="password" autoComplete={mode === 'up' ? 'new-password' : 'current-password'} required value={pw} onChange={e => setPw(e.target.value)} /></label>}
+          {mode === 'up' && <label className="field"><span>Code from your admin</span><input className="input" required autoComplete="one-time-code" autoCapitalize="characters" value={code} onChange={e => setCode(e.target.value.toUpperCase().replace(/\s/g, ''))} placeholder="e.g. K7QM4XPA" style={{ letterSpacing: '.12em', fontWeight: 700 }} /></label>}
+          <label className="field"><span>{mode === 'up' ? 'New password' : 'Password'}</span><input className="input" type="password" autoComplete={mode === 'up' ? 'new-password' : 'current-password'} required value={pw} onChange={e => setPw(e.target.value)} /></label>
           {mode === 'up' && <label className="field"><span>Repeat password</span><input className="input" type="password" autoComplete="new-password" required value={pw2} onChange={e => setPw2(e.target.value)} /></label>}
-          {msg && <div className={`note ${msg.ok ? 'good' : 'bad'}`} style={{ marginBottom: 14 }}>{msg.t}</div>}
-          <button className="btn primary block" disabled={busy}>{busy ? 'Please wait…' : mode === 'in' ? 'Sign in' : mode === 'up' ? 'Create my account' : 'Send reset link'}</button>
+          {msg && <div className="note bad" role="alert" style={{ marginBottom: 14 }}>{msg}</div>}
+          <button className="btn primary block" disabled={busy}>{busy ? 'Please wait…' : mode === 'in' ? 'Sign in' : 'Save password & sign in'}</button>
           <div className="row between" style={{ marginTop: 16 }}>
-            {mode === 'in' ? <button type="button" className="linkbtn" onClick={() => setMode('up')}>{codes ? 'First time or forgot password?' : 'First time? Set up your account'}</button>
+            {mode === 'in' ? <button type="button" className="linkbtn" onClick={() => setMode('up')}>First time or forgot password?</button>
               : <button type="button" className="linkbtn" onClick={() => setMode('in')}>Back to sign in</button>}
-            {mode === 'in' && !codes && <button type="button" className="linkbtn" onClick={() => setMode('reset')}>Forgot password</button>}
+            <a className="linkbtn" href="#/privacy">Privacy</a>
           </div>
         </form>
       </div>
@@ -74,55 +85,98 @@ function AuthScreen() {
   );
 }
 
-function Session() {
-  const me = useLoad(() => backend.me(), []);
-  const [sv, setSv] = useState(0);
-  const settings = useLoad(() => backend.settings(), [sv]);
-  const clock = useLoad(() => backend.serverTime(), []);
-  const [pv, setPv] = useState(0);
-  const pending = useLoad(async () => {
-    if (me.data?.role !== 'admin') return 0;
-    const [l, c] = await Promise.all([backend.leaves(), backend.corrections()]);
-    return l.filter(x => x.status === 'pending').length + c.filter(x => x.status === 'pending').length;
-  }, [me.data?.role, pv]);
+// Invite link from WhatsApp: #/join?e=<email>&c=<code> → set password → install the app.
+function JoinPage({ signedIn }: { signedIn: boolean }) {
+  const q = new URLSearchParams(useLocation().search);
+  const email = (q.get('e') ?? '').slice(0, 120), code = (q.get('c') ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+  if (!signedIn) return <AuthScreen key={email + code} initial={{ email, code }} />;
+  return (
+    <div className="auth">
+      <AuthArt />
+      <div className="auth-form"><div style={{ width: '100%', maxWidth: 380 }}>
+        <div className="note good" style={{ marginBottom: 18 }}><Icon n="check" />Password saved — you’re in.</div>
+        <h1 style={{ fontSize: 26 }}>Now add PunchIn to your phone</h1>
+        <p className="muted" style={{ margin: '6px 0 18px' }}>It opens like any other app, full screen, with one tap from your home screen.</p>
+        <InstallSteps />
+        <a className="btn ghost block" style={{ marginTop: 14 }} href="#/">Continue in the browser</a>
+      </div></div>
+    </div>
+  );
+}
 
-  if (me.loading || settings.loading && !settings.data) return <Splash />;
-  if (!me.data) return <NotMember />;
-  if (!settings.data) return <div className="center-screen"><p>{settings.error ?? 'Could not load settings.'}</p></div>;
-  const tz = settings.data.timezone;
-  const today = dateInTz(clock.data ? new Date(clock.data) : new Date(), tz);
-  const ctx: AppCtx = { me: me.data, settings: settings.data, today, reloadSettings: () => setSv(x => x + 1), pending: pending.data ?? 0, reloadPending: () => setPv(x => x + 1) };
-  const admin = me.data.role === 'admin';
+const EMP_TOUR: TourStep[] = [
+  { target: 'punch', title: 'Check in and out here', body: 'Tap once when you arrive and once when you leave. The ring fills up as your hours add up — it turns green when you hit your daily target.' },
+  { target: 'map', title: 'Your office area', body: 'Check-in only works inside this orange circle. Tap “Am I inside?” any time to see where you are.' },
+  { target: 'week', title: 'Your week at a glance', body: 'Each bar shows the hours you worked that day.' },
+  { target: 'month', title: 'This month', body: 'How many days you met the target, late arrivals and leave left.' },
+  { target: 'nav-leave', title: 'Apply for leave', body: 'Pick dates — weekends and office holidays are never counted against you.' },
+  { target: 'nav-fixes', title: 'Forgot to check out?', body: 'Ask for a fix here and your admin will correct it.' },
+  { target: 'bell', title: 'Notifications', body: 'Holiday notices and reminders show up here.' },
+];
+const ADMIN_TOUR: TourStep[] = [
+  { target: 'setup', title: 'Your set-up checklist', body: 'Five quick steps. Each one opens the right screen. The list disappears once everything is done.' },
+  { target: 'nav-approvals', title: 'Approvals', body: 'Leave requests and check-in fixes wait here. The number shows how many need you.' },
+  { target: 'nav-people', title: 'People', body: 'Add staff by email. You get a code to send on WhatsApp — the app does the rest.' },
+  { target: 'nav-holidays', title: 'Holidays', body: 'Upload your holiday PDF or photo, or tick India’s public holidays — no typing.' },
+  { target: 'nav-settings', title: 'Settings', body: 'Office hours, weekly off, the office map circle and WhatsApp reminders.' },
+  { target: 'bell', title: 'Reminders', body: 'The evening before a holiday you’ll get a reminder here and by email to announce it on WhatsApp.' },
+];
+
+function Session() {
+  const [boot, setBoot] = useState<Boot | null | undefined>(undefined);
+  const [err, setErr] = useState<string | null>(null);
+  const [touring, setTouring] = useState(false);
+  const load = useCallback(() => { backend.bootstrap().then(b => { setBoot(b); setErr(null); }).catch(e => setErr(e.message)); }, []);
+  useEffect(load, [load]);
+  // refresh when the app comes back to the foreground
+  useEffect(() => { const f = () => document.visibilityState === 'visible' && load(); document.addEventListener('visibilitychange', f); return () => document.removeEventListener('visibilitychange', f); }, [load]);
+  useEffect(() => {
+    if (!boot) return;
+    const k = tourKey(boot.me.id, boot.me.role);
+    if (!seen(k)) { const t = setTimeout(() => setTouring(true), 900); return () => clearTimeout(t); }
+  }, [boot]);
+
+  if (boot === undefined) return err ? <div className="center-screen"><div className="card" style={{ maxWidth: 420 }}><h2>Can’t reach PunchIn</h2><p className="muted" style={{ marginBottom: 14 }}>{err}</p><button className="btn primary" onClick={load}>Try again</button></div></div> : <Splash />;
+  if (!boot) return <NotMember />;
+  const admin = boot.me.role === 'admin';
+  const ctx: AppCtx = { ...boot, reload: load, startTour: () => setTouring(true) };
+  const endTour = () => { setTouring(false); markSeen(tourKey(boot.me.id, boot.me.role)); if (admin && !seen(tourKey(boot.me.id, 'employee'))) markSeen(tourKey(boot.me.id, 'employee')); };
   return (
     <Ctx.Provider value={ctx}>
-      <HashRouter>
-        <div className="shell">
-          <Side admin={admin} />
-          <main className="main">
-            <Routes>
-              <Route path="/" element={<TodayPage />} />
-              <Route path="/history" element={<HistoryPage />} />
-              <Route path="/leave" element={<LeavePage />} />
-              <Route path="/fixes" element={<FixesPage />} />
-              <Route path="/me" element={<MePage />} />
-              {admin && <>
-                <Route path="/admin" element={<OverviewPage />} />
-                <Route path="/admin/people" element={<PeoplePage />} />
-                <Route path="/admin/records" element={<RecordsPage />} />
-                <Route path="/admin/approvals" element={<ApprovalsPage />} />
-                <Route path="/admin/holidays" element={<HolidaysPage />} />
-                <Route path="/admin/settings" element={<SettingsPage />} />
-                <Route path="/admin/security" element={<SecurityPage />} />
-                <Route path="/more" element={<MorePage />} />
-              </>}
-              <Route path="*" element={<Navigate to="/" />} />
-            </Routes>
-          </main>
-          <BottomNav admin={admin} />
-        </div>
-      </HashRouter>
+      <div className="shell">
+        <Side admin={admin} />
+        <main className="main">
+          <Routes>
+            <Route path="/" element={<Navigate to={admin ? '/admin' : '/today'} replace />} />
+            <Route path="/today" element={<TodayPage />} />
+            <Route path="/history" element={<HistoryPage />} />
+            <Route path="/leave" element={<LeavePage />} />
+            <Route path="/fixes" element={<FixesPage />} />
+            <Route path="/me" element={<MePage />} />
+            {admin && <>
+              <Route path="/admin" element={<OverviewPage />} />
+              <Route path="/admin/people" element={<PeoplePage />} />
+              <Route path="/admin/records" element={<RecordsPage />} />
+              <Route path="/admin/approvals" element={<ApprovalsPage />} />
+              <Route path="/admin/holidays" element={<HolidaysPage />} />
+              <Route path="/admin/settings" element={<SettingsPage />} />
+              <Route path="/admin/security" element={<SecurityPage />} />
+              <Route path="/announce" element={<AnnouncePage />} />
+              <Route path="/more" element={<MorePage />} />
+            </>}
+            <Route path="*" element={<Navigate to="/" />} />
+          </Routes>
+        </main>
+        <BottomNav admin={admin} />
+      </div>
+      {touring && <Tour steps={admin ? ADMIN_TOUR : EMP_TOUR} onDone={endTour} />}
     </Ctx.Provider>
   );
+}
+
+export function TopActions() {
+  const { notifications } = useApp(); const nav = useNavigate();
+  return <div className="top-actions"><Bell items={notifications} onOpen={n => n.link && nav(n.link.replace(/^#/, ''))} /></div>;
 }
 
 function NotMember() {
@@ -132,9 +186,10 @@ function NotMember() {
   </div></div>;
 }
 
-const EMP_NAV = [['/', 'today', 'Today'], ['/history', 'history', 'History'], ['/leave', 'leave', 'Leave'], ['/fixes', 'fix', 'Fixes'], ['/me', 'me', 'Me']] as const;
+const EMP_NAV = [['/today', 'today', 'Today'], ['/history', 'history', 'History'], ['/leave', 'leave', 'Leave'], ['/fixes', 'fix', 'Fixes'], ['/me', 'me', 'Me']] as const;
 const ADMIN_NAV = [['/admin', 'overview', 'Overview'], ['/admin/approvals', 'approvals', 'Approvals'], ['/admin/people', 'people', 'People'], ['/admin/records', 'records', 'Records'],
   ['/admin/holidays', 'holidays', 'Holidays'], ['/admin/settings', 'settings', 'Settings'], ['/admin/security', 'shield', 'Security']] as const;
+const tourId = (to: string) => 'nav-' + (to.split('/').pop() || 'today');
 
 function Side({ admin }: { admin: boolean }) {
   const { me, settings, pending } = useApp();
@@ -142,9 +197,9 @@ function Side({ admin }: { admin: boolean }) {
     <nav className="side" aria-label="Main">
       <div className="brand"><img src="./icon.svg" alt="" /><div><b>Punch<span>In</span></b><small>{settings.company_name}</small></div></div>
       {admin && <div className="navsec">My day</div>}
-      {EMP_NAV.slice(0, 4).map(([to, i, l]) => <NavLink key={to} to={to} end className="navlink"><Icon n={i} />{l}</NavLink>)}
+      {EMP_NAV.slice(0, 4).map(([to, i, l]) => <NavLink key={to} to={to} end className="navlink" data-tour={tourId(to)}><Icon n={i} />{l}</NavLink>)}
       {admin && <><div className="navsec">Team</div>
-        {ADMIN_NAV.map(([to, i, l]) => <NavLink key={to} to={to} end className="navlink"><Icon n={i} />{l}{to === '/admin/approvals' && pending > 0 && <span className="count">{pending}</span>}</NavLink>)}</>}
+        {ADMIN_NAV.map(([to, i, l]) => <NavLink key={to} to={to} end className="navlink" data-tour={tourId(to)}><Icon n={i} />{l}{to === '/admin/approvals' && (pending ?? 0) > 0 && <span className="count">{pending}</span>}</NavLink>)}</>}
       <div className="grow" />
       <NavLink to="/me" className="whoami" style={{ textDecoration: 'none', color: 'inherit', borderRadius: 12 }}>
         <div className="avatar">{me.nickname[0]?.toUpperCase()}</div>
@@ -157,8 +212,8 @@ function Side({ admin }: { admin: boolean }) {
 function BottomNav({ admin }: { admin: boolean }) {
   const { pending } = useApp();
   const items = admin
-    ? [['/', 'today', 'Today'], ['/admin', 'overview', 'Team'], ['/admin/approvals', 'approvals', 'Approve'], ['/admin/people', 'people', 'People'], ['/more', 'more', 'More']]
+    ? [['/today', 'today', 'Today'], ['/admin', 'overview', 'Team'], ['/admin/approvals', 'approvals', 'Approve'], ['/admin/people', 'people', 'People'], ['/more', 'more', 'More']]
     : EMP_NAV;
   return <nav className="bottomnav" aria-label="Main">{items.map(([to, i, l]) =>
-    <NavLink key={to} to={to} end><Icon n={i} />{l}{to === '/admin/approvals' && pending > 0 && <span className="dot" />}</NavLink>)}</nav>;
+    <NavLink key={to} to={to} end data-tour={tourId(to)}><Icon n={i} />{l}{to === '/admin/approvals' && (pending ?? 0) > 0 && <span className="dot" />}</NavLink>)}</nav>;
 }

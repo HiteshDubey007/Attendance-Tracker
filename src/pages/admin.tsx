@@ -1,12 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, NavLink, useSearchParams } from 'react-router-dom';
 import { Bar } from 'react-chartjs-2';
 import { backend } from '@backend';
 import { useApp } from '../App';
-import type { Day, Member, MemberStatus, Role, Settings } from '../lib/types';
+import type { Day, HolidayCandidate, Member, MemberStatus, Role, Settings, WeekendMode } from '../lib/types';
 import { addDays, download, fmtDate, fmtDuration, getPosition, hhmmInTz, KIND_LABEL, monthRange, pct, timeInTz, toCsv } from '../lib/time';
 import { Busy, C, Donut, Empty, Icon, Modal, Pill, Seg, StatusPill, useLoad, useToast } from '../ui';
 import { Top } from './employee';
+import { OfficeMap, Tip } from '../extras';
 
 const nameOf = (ms: Member[] | undefined, id: string | null) => ms?.find(m => m.id === id)?.nickname ?? '—';
 
@@ -38,9 +39,10 @@ export function OverviewPage() {
 
   return <>
     <Top title="Team today" sub={new Date(today + 'T12:00:00Z').toLocaleDateString('en-IN', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' })}>
-      {pending > 0 && <Link className="btn primary" to="/admin/approvals"><Icon n="approvals" />{pending} waiting for you</Link>}
+      {(pending ?? 0) > 0 && <Link className="btn primary" to="/admin/approvals"><Icon n="approvals" />{pending} waiting for you</Link>}
     </Top>
     <div className="page">
+      <SetupChecklist />
       <div className="stats num">
         <div className="stat hot"><div className="v">{count(r => r.kind === 'working')}</div><div className="l">In the office now</div></div>
         <div className="stat"><div className="v">{count(r => !!r.check_out)}</div><div className="l">Checked out</div></div>
@@ -119,9 +121,9 @@ export function OverviewPage() {
 // ═════════════ People ═════════════
 export function PeoplePage() {
   const members = useLoad(() => backend.members(), []);
-  const { me } = useApp(); const toast = useToast();
+  const { me, reload } = useApp(); const toast = useToast();
   const [adding, setAdding] = useState(false); const [editing, setEditing] = useState<Member | null>(null);
-  const [code, setCode] = useState<{ who: string; code: string } | null>(null);
+  const [code, setCode] = useState<{ who: string; email: string; code: string } | null>(null);
   const [q, setQ] = useState('');
   const list = (members.data ?? []).filter(m => (m.nickname + m.email).toLowerCase().includes(q.toLowerCase()));
   return <>
@@ -134,7 +136,7 @@ export function PeoplePage() {
             <div className="avatar" style={m.status !== 'active' ? { background: 'var(--canvas)', color: 'var(--muted)' } : undefined}>{m.nickname[0]?.toUpperCase()}</div>
             <div className="grow">
               <div className="ttl">{m.nickname} {m.role === 'admin' && <span className="tag">Admin</span>}</div>
-              <div className="sub">{m.email}{m.user_id !== undefined && <> · {m.user_id ? 'Account set up' : 'Invited — hasn’t signed up yet'}</>}</div>
+              <div className="sub">{m.email}{(m.shift_start || m.required_minutes || m.weekend_mode) && <> · <span className="tag">Own shift</span></>}</div>
             </div>
             <div className="right row" style={{ gap: 8 }}>
               {m.status !== 'active' && <StatusPill s={m.status} />}
@@ -144,17 +146,18 @@ export function PeoplePage() {
           </div>))}</div>
         {!list.length && !members.loading && <Empty title="Nobody here">Add people by their office email.</Empty>}
       </section>
-      <div className="note info"><Icon n="alert" />{backend.usesCodes ? 'When you add someone you get an 8-letter code. They open PunchIn, tap “First time or forgot password?”, and enter their email, the code and a new password. Codes work once and expire in 14 days.' : 'After you add someone, they open this app, tap “First time? Set up your account”, and use the same email to choose a password. Nobody else can sign up.'}</div>
+      <div className="note info"><Icon n="alert" />When you add someone you get a WhatsApp invite with a one-time code. They tap the link, choose a password and install the app. Codes work once and expire in 14 days. Forgot password? Edit the person → New sign-in code.</div>
     </div>
-    {adding && <AddPerson onClose={() => setAdding(false)} onDone={(who, c) => { setAdding(false); members.reload(); c ? setCode({ who, code: c }) : toast('Person added. Ask them to set up their account.'); }} />}
-    {editing && <EditPerson m={editing} onClose={() => setEditing(null)} onCode={c => { setEditing(null); setCode({ who: editing.nickname, code: c }); }} onDone={msg => { setEditing(null); members.reload(); toast(msg); }} />}
-    {code && <CodeCard who={code.who} code={code.code} onClose={() => setCode(null)} />}
+    {adding && <AddPerson onClose={() => setAdding(false)} onDone={(who, email, c) => { setAdding(false); members.reload(); reload(); if (c) setCode({ who, email, code: c }); else toast('Person added'); }} />}
+    {editing && <EditPerson m={editing} onClose={() => setEditing(null)} onCode={c => { setEditing(null); setCode({ who: editing.nickname, email: editing.email, code: c }); }} onDone={msg => { setEditing(null); members.reload(); toast(msg); }} />}
+    {code && <CodeCard who={code.who} email={code.email} code={code.code} onClose={() => setCode(null)} />}
   </>;
 }
 
-function CodeCard({ who, code, onClose }: { who: string; code: string; onClose: () => void }) {
+function CodeCard({ who, email, code, onClose }: { who: string; email: string; code: string; onClose: () => void }) {
   const toast = useToast();
-  const text = `PunchIn: your sign-in code is ${code}. Open ${location.href.split('#')[0]} → “First time or forgot password?”, use your office email, this code and a new password. The code expires in 14 days.`;
+  const link = `${location.href.split('#')[0]}#/join?e=${encodeURIComponent(email)}&c=${code}`;
+  const text = `Hi ${who}! 👋 You’re invited to PunchIn, our office attendance app.\n\n1️⃣ Tap: ${link}\n2️⃣ Choose a password\n3️⃣ Add the app to your home screen\n\nYour one-time code is ${code} (valid 14 days).`;
   return (
     <Modal title={`Code for ${who}`} lede="Share it privately (WhatsApp, in person). It works once and expires in 14 days." onClose={onClose}>
       <div className="display num" style={{ fontSize: 40, fontWeight: 800, letterSpacing: '.18em', textAlign: 'center', padding: '18px 0', background: 'var(--orange-wash)', borderRadius: 16, color: 'var(--orange-ink)', marginBottom: 16 }}>{code}</div>
@@ -162,12 +165,12 @@ function CodeCard({ who, code, onClose }: { who: string; code: string; onClose: 
         <button className="btn ghost" onClick={() => { navigator.clipboard?.writeText(text).then(() => toast('Message copied')); }}>Copy message</button>
         <a className="btn primary" href={`https://wa.me/?text=${encodeURIComponent(text)}`} target="_blank" rel="noreferrer">Send on WhatsApp</a>
       </div>
-      <p className="small muted" style={{ marginTop: 14 }}>This code is not shown again. If it’s lost, open the person and tap “New sign-in code”.</p>
+      <p className="small muted" style={{ marginTop: 14 }}>The message has a link that fills in their email and code. The code is not shown again — if it’s lost, open the person and tap “New sign-in code”.</p>
     </Modal>
   );
 }
 
-function AddPerson({ onClose, onDone }: { onClose: () => void; onDone: (who: string, code: string | null) => void }) {
+function AddPerson({ onClose, onDone }: { onClose: () => void; onDone: (who: string, email: string, code: string | null) => void }) {
   const [email, setEmail] = useState(''); const [nick, setNick] = useState(''); const [role, setRole] = useState<Role>('employee');
   return (
     <Modal title="Add a person" lede="They’ll be able to create their account with this email." onClose={onClose}>
@@ -175,20 +178,32 @@ function AddPerson({ onClose, onDone }: { onClose: () => void; onDone: (who: str
       <label className="field"><span>Nickname</span><input className="input" maxLength={40} value={nick} onChange={e => setNick(e.target.value)} placeholder="Shown across the app" /></label>
       <label className="field"><span>Role</span><select className="input" value={role} onChange={e => setRole(e.target.value as Role)}><option value="employee">Employee</option><option value="admin">Admin (sees everyone, approves requests)</option></select></label>
       <div className="row end"><button className="btn ghost" onClick={onClose}>Cancel</button>
-        <Busy run={async () => { const c = await backend.addMember(email, nick, role); onDone(nick, c); }} disabled={!/\S+@\S+\.\S+/.test(email) || !nick.trim()}>Add person</Busy></div>
+        <Busy run={async () => { const c = await backend.addMember(email, nick, role); onDone(nick, email.trim().toLowerCase(), c); }} disabled={!/\S+@\S+\.\S+/.test(email) || !nick.trim()}>Add person</Busy></div>
     </Modal>
   );
 }
 
 function EditPerson({ m, onClose, onDone, onCode }: { m: Member; onClose: () => void; onDone: (msg: string) => void; onCode: (code: string) => void }) {
+  const { settings } = useApp();
   const [nick, setNick] = useState(m.nickname); const [role, setRole] = useState<Role>(m.role); const [confirmDel, setConfirmDel] = useState(false);
-  const save = (status: MemberStatus, msg: string) => async () => { await backend.updateMember(m.id, nick, role, status); onDone(msg); };
+  const [own, setOwn] = useState(!!(m.shift_start || m.required_minutes || m.weekend_mode));
+  const [start, setStart] = useState((m.shift_start ?? settings.shift_start).slice(0, 5));
+  const [mins, setMins] = useState(m.required_minutes ?? settings.required_minutes);
+  const [wk, setWk] = useState<WeekendMode>(m.weekend_mode ?? settings.weekend_mode);
+  const shift = own ? { shift_start: start, required_minutes: mins, weekend_mode: wk } : { shift_start: null, required_minutes: null, weekend_mode: null };
+  const save = (status: MemberStatus, msg: string) => async () => { await backend.updateMember(m.id, { nickname: nick, role, status, ...shift }); onDone(msg); };
   return (
     <Modal title={`Edit ${m.nickname}`} lede={m.email} onClose={onClose}>
       <label className="field"><span>Nickname</span><input className="input" maxLength={40} value={nick} onChange={e => setNick(e.target.value)} /></label>
-      <label className="field"><span>Role</span><select className="input" value={role} onChange={e => setRole(e.target.value as Role)}><option value="employee">Employee</option><option value="admin">Admin</option></select></label>
+      <label className="field"><span>Role <Tip>Admins see everyone, approve requests and change settings. Make your manager an admin; you can stay an employee.</Tip></span><select className="input" value={role} onChange={e => setRole(e.target.value as Role)}><option value="employee">Employee</option><option value="admin">Admin</option></select></label>
+      <label className="check"><input type="checkbox" checked={own} onChange={e => setOwn(e.target.checked)} />Different hours for this person <Tip>For part-timers, night shift or a 6-day week. Leave unticked to use the office timings.</Tip></label>
+      {own && <div className="two">
+        <label className="field"><span>Shift starts</span><input className="input" type="time" value={start} onChange={e => setStart(e.target.value)} /></label>
+        <label className="field"><span>Hours a day</span><select className="input" value={mins} onChange={e => setMins(Number(e.target.value))}>{[240, 300, 360, 420, 450, 480, 510, 540, 570, 600].map(x => <option key={x} value={x}>{fmtDuration(x)}</option>)}</select></label>
+        <label className="field"><span>Weekly off</span><select className="input" value={wk} onChange={e => setWk(e.target.value as WeekendMode)}><option value="sat_sun">Saturday & Sunday</option><option value="sun">Sunday only</option><option value="none">None</option></select></label>
+      </div>}
       <div className="row between" style={{ marginBottom: 18 }}>
-        {backend.usesCodes ? <Busy className="btn ghost" run={async () => onCode(await backend.resetCode(m.id))}>New sign-in code</Busy> : <span />}
+        <Busy className="btn ghost" run={async () => onCode(await backend.resetCode(m.id))}>New sign-in code</Busy>
         <Busy run={save(m.status, 'Saved')}>Save changes</Busy></div>
       <div style={{ borderTop: '1px solid var(--line)', paddingTop: 16 }} className="row between">
         {m.status === 'blocked'
@@ -200,6 +215,34 @@ function EditPerson({ m, onClose, onDone, onCode }: { m: Member; onClose: () => 
       </div>
       <p className="small muted" style={{ marginTop: 12 }}>Blocking stops sign-in and punching but keeps everything. Removing hides them from the team; their past records stay in the audit trail, and adding the same email later restores them.</p>
     </Modal>
+  );
+}
+
+// ═════════════ Set-up checklist (admin home) ═════════════
+function SetupChecklist() {
+  const { setup, settings } = useApp();
+  const [hidden, setHidden] = useState(() => { try { return localStorage.getItem('punchin.setup.hidden') === '1'; } catch { return false; } });
+  if (!setup || hidden) return null;
+  const steps = [
+    { done: settings.company_name !== 'My Company', to: '/admin/settings', title: 'Set company name and office hours', sub: 'Shift start, daily hours, weekly off' },
+    { done: setup.location, to: '/admin/settings#location', title: 'Mark the office on the map', sub: 'Draw the circle people must be inside to check in' },
+    { done: setup.holidays > 0, to: '/admin/holidays', title: 'Add this year’s holidays', sub: 'Upload your PDF/photo, or tick public holidays' },
+    { done: setup.people > 1, to: '/admin/people', title: 'Invite your team', sub: 'Each person gets a WhatsApp invite link' },
+    { done: setup.whatsapp, to: '/admin/settings#whatsapp', title: 'Link the office WhatsApp group', sub: 'For one-tap holiday announcements' },
+  ];
+  const left = steps.filter(x => !x.done).length;
+  if (!left) return null;
+  return (
+    <section className="card" data-tour="setup">
+      <h2>Get PunchIn ready <small>{steps.length - left} of {steps.length} done</small></h2>
+      <div className="progress" style={{ marginBottom: 6 }}><i style={{ width: `${((steps.length - left) / steps.length) * 100}%` }} /></div>
+      {steps.map(x => <Link key={x.title} to={x.to} className={`setup-step ${x.done ? 'done' : ''}`}>
+        <span className="tick">{x.done && <Icon n="check" />}</span>
+        <div className="grow"><div className="ttl" style={{ fontWeight: 700 }}>{x.title}</div><div className="sub small muted">{x.sub}</div></div>
+        {!x.done && <Icon n="more" width={18} height={18} />}
+      </Link>)}
+      <button className="linkbtn" style={{ marginTop: 10 }} onClick={() => { try { localStorage.setItem('punchin.setup.hidden', '1'); } catch { /* ignore */ } setHidden(true); }}>Hide this list</button>
+    </section>
   );
 }
 
@@ -290,7 +333,7 @@ function EditDay({ d, tz, rec, member, onClose, onSave, onDelete }: { d: Day; tz
 
 // ═════════════ Approvals ═════════════
 export function ApprovalsPage() {
-  const { settings, reloadPending } = useApp(); const toast = useToast();
+  const { settings, reload } = useApp(); const toast = useToast();
   const members = useLoad(() => backend.members(), []);
   const leaves = useLoad(() => backend.leaves(), []);
   const fixes = useLoad(() => backend.corrections(), []);
@@ -298,7 +341,7 @@ export function ApprovalsPage() {
   const [note, setNote] = useState<Record<string, string>>({});
   const pl = (leaves.data ?? []).filter(l => hist ? l.status !== 'pending' : l.status === 'pending');
   const pf = (fixes.data ?? []).filter(c => hist ? c.status !== 'pending' : c.status === 'pending');
-  const done = (msg: string) => { leaves.reload(); fixes.reload(); reloadPending(); toast(msg); };
+  const done = (msg: string) => { leaves.reload(); fixes.reload(); reload(); toast(msg); };
   const npl = (leaves.data ?? []).filter(l => l.status === 'pending').length, npf = (fixes.data ?? []).filter(c => c.status === 'pending').length;
   return <>
     <Top title="Approvals" sub="Leave requests and attendance fixes"><Seg value={tab} onChange={setTab} options={[['leave', `Leave${npl ? ` (${npl})` : ''}`], ['fix', `Fixes${npf ? ` (${npf})` : ''}`]]} /></Top>
@@ -350,87 +393,176 @@ export function ApprovalsPage() {
 
 // ═════════════ Holidays ═════════════
 export function HolidaysPage() {
-  const { today } = useApp(); const toast = useToast();
+  const { today, reload } = useApp(); const toast = useToast();
   const hol = useLoad(() => backend.holidays(), []);
-  const [date, setDate] = useState(''); const [name, setName] = useState('');
   const [year, setYear] = useState(today.slice(0, 4));
+  const [review, setReview] = useState<{ title: string; items: (HolidayCandidate & { on: boolean })[] } | null>(null);
+  const [date, setDate] = useState(''); const [name, setName] = useState('');
+  const [over, setOver] = useState(false); const [reading, setReading] = useState(false);
   const years = useMemo(() => Array.from(new Set([today.slice(0, 4), String(Number(today.slice(0, 4)) + 1), ...(hol.data ?? []).map(h => h.holiday_date.slice(0, 4))])).sort(), [hol.data, today]);
   const list = (hol.data ?? []).filter(h => h.holiday_date.startsWith(year));
+  const existing = new Set((hol.data ?? []).map(h => h.holiday_date));
+
+  async function readFile(f: File | undefined) {
+    if (!f) return;
+    setReading(true);
+    try {
+      const items = await backend.readHolidayFile(f, Number(year));
+      if (!items.length) toast('No dates found in that file. Try a clearer photo or add them below.', true);
+      else setReview({ title: `Found ${items.length} holidays in “${f.name}”`, items: items.map(x => ({ ...x, on: !existing.has(x.date) })) });
+    } catch (e: any) { toast(e.message, true); }
+    setReading(false);
+  }
+  const done = () => { hol.reload(); reload(); };
   return <>
     <Top title="Holidays" sub="Office holidays never count against anyone’s leave" />
-    <div className="page" style={{ maxWidth: 820 }}>
-      <section className="card">
-        <h2>Add a holiday</h2>
-        <div className="two">
-          <label className="field"><span>Date</span><input className="input" type="date" value={date} onChange={e => setDate(e.target.value)} /></label>
-          <label className="field"><span>Name</span><input className="input" maxLength={60} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Diwali" /></label>
-        </div>
-        <div className="row end"><Busy run={async () => { await backend.addHoliday(date, name.trim()); setDate(''); setName(''); hol.reload(); toast('Holiday added'); }} disabled={!date || !name.trim()}><Icon n="plus" />Add holiday</Busy></div>
-      </section>
+    <div className="page" style={{ maxWidth: 860 }}>
+      <div className="grid g2">
+        <section className="card">
+          <h2>Upload your holiday list <Tip>Take a photo of the printed list or upload the PDF HR sent. PunchIn reads the dates; you tick which to keep. Nothing is saved until you confirm.</Tip></h2>
+          <label className={`dropzone ${over ? 'over' : ''}`} onDragOver={e => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+            onDrop={e => { e.preventDefault(); setOver(false); readFile(e.dataTransfer.files[0]); }}>
+            <input type="file" accept="application/pdf,image/png,image/jpeg,image/webp" hidden onChange={e => { readFile(e.target.files?.[0]); e.target.value = ''; }} />
+            <b>{reading ? 'Reading your list…' : 'PDF or photo'}</b>
+            <span className="small muted">{reading ? 'This takes about 10 seconds' : 'Tap to choose, or drop the file here'}</span>
+          </label>
+        </section>
+        <section className="card">
+          <h2>India public holidays <Tip>From Google’s public holiday calendar. Gazetted holidays are pre-ticked; festivals and observances are listed unticked.</Tip></h2>
+          <p className="small muted" style={{ marginBottom: 14 }}>Pick from the official list for {year} — no typing.</p>
+          <Busy className="btn primary" run={async () => {
+            const items = await backend.publicHolidays(Number(year));
+            setReview({ title: `Public holidays ${year}`, items: items.map(x => ({ ...x, on: !!x.gazetted && !existing.has(x.date) })) });
+          }}>Show {year} list</Busy>
+        </section>
+      </div>
       <section className="card">
         <h2>{list.length} holiday{list.length === 1 ? '' : 's'} <Seg value={year} onChange={setYear} options={years.map(y => [y, y] as [string, string])} /></h2>
         {list.length ? <div className="list">{list.map(h => (
           <div className="item" key={h.id}>
             <div className="datechip"><b>{Number(h.holiday_date.slice(8))}</b><small>{fmtDate(h.holiday_date, { month: 'short' })}</small></div>
-            <div className="grow"><div className="ttl">{h.name}</div><div className="sub">{fmtDate(h.holiday_date, { weekday: 'long' })}</div></div>
-            {<Busy className="btn ghost sm" run={async () => { await backend.deleteHoliday(h.id); hol.reload(); toast('Holiday removed'); }}>Remove</Busy>}
-          </div>))}</div> : <Empty title={`No holidays for ${year}`}>Add Holi, Diwali, Independence Day and the rest.</Empty>}
+            <div className="grow"><div className="ttl">{h.name}</div><div className="sub">{fmtDate(h.holiday_date, { weekday: 'long' })}{h.holiday_date >= today && h.holiday_date <= addDays(today, 7) && <> · <Link to={`/announce?date=${h.holiday_date}`}>Announce</Link></>}</div></div>
+            <Busy className="btn ghost sm" run={async () => { await backend.deleteHoliday(h.id); done(); toast('Holiday removed'); }}>Remove</Busy>
+          </div>))}</div> : <Empty title={`No holidays for ${year}`}>Upload the list or pick public holidays above.</Empty>}
+        <div style={{ borderTop: '1px solid var(--line)', marginTop: 14, paddingTop: 14 }}>
+          <div className="two">
+            <label className="field"><span>Date</span><input className="input" type="date" value={date} onChange={e => setDate(e.target.value)} /></label>
+            <label className="field"><span>Name</span><input className="input" maxLength={60} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Company foundation day" /></label>
+          </div>
+          <div className="row end"><Busy className="btn ghost" run={async () => { await backend.addHoliday(date, name.trim()); setDate(''); setName(''); done(); toast('Holiday added'); }} disabled={!date || !name.trim()}><Icon n="plus" />Add one</Busy></div>
+        </div>
       </section>
     </div>
+    {review && <Modal title={review.title} lede="Untick anything your office doesn’t take off. You can fix names and dates." onClose={() => setReview(null)}>
+      <div style={{ maxHeight: '50vh', overflowY: 'auto', marginBottom: 16 }}>
+        {review.items.map((it, i) => (
+          <div className="cand" key={i}>
+            <input type="checkbox" checked={it.on} aria-label={`Include ${it.name}`} onChange={e => setReview({ ...review, items: review.items.map((x, j) => j === i ? { ...x, on: e.target.checked } : x) })} />
+            <input className="input" type="date" value={it.date} onChange={e => setReview({ ...review, items: review.items.map((x, j) => j === i ? { ...x, date: e.target.value } : x) })} />
+            <input className="input nm" value={it.name} maxLength={60} onChange={e => setReview({ ...review, items: review.items.map((x, j) => j === i ? { ...x, name: e.target.value } : x) })} />
+            {existing.has(it.date) && <span className="small muted" style={{ gridColumn: '2 / -1' }}>Already in your list</span>}
+          </div>))}
+      </div>
+      <div className="row end">
+        <button className="btn ghost" onClick={() => setReview(null)}>Cancel</button>
+        <Busy run={async () => {
+          const r = await backend.addHolidays(review.items.filter(x => x.on).map(({ date, name }) => ({ date, name })));
+          setReview(null); done(); toast(`Added ${r.added} holiday${r.added === 1 ? '' : 's'}${r.skipped.length ? `, skipped ${r.skipped.length}` : ''}`);
+        }} disabled={!review.items.some(x => x.on)}>Add {review.items.filter(x => x.on).length} holidays</Busy>
+      </div>
+    </Modal>}
   </>;
 }
 
 // ═════════════ Settings ═════════════
 export function SettingsPage() {
-  const { settings, reloadSettings } = useApp(); const toast = useToast();
+  const { settings, reload } = useApp(); const toast = useToast();
   const [s, setS] = useState<Settings>(settings);
-  const up = <K extends keyof Settings>(k: K, v: Settings[K]) => setS({ ...s, [k]: v });
+  const up = <K extends keyof Settings>(k: K, v: Settings[K]) => setS(x => ({ ...x, [k]: v }));
   const [geoMsg, setGeoMsg] = useState<string | null>(null);
+  useEffect(() => { const id = location.hash.split('#')[2]; if (id) setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' }), 300); }, []);
+  const save = async () => {
+    if (s.geofence_enabled && (s.office_lat == null || s.office_lng == null)) throw new Error('Mark the office on the map before turning the check on.');
+    const { company_name, timezone, required_minutes, half_day_minutes, weekend_mode, annual_leave_days, shift_start, late_grace_minutes, geofence_enabled, office_lat, office_lng,
+      geofence_radius_m, max_gps_accuracy_m, office_end, earliest_checkin, late_marks_per_half_day, reminder_hour, notify_admin_email, whatsapp_group_link, admin_whatsapp_phone, callmebot_apikey } = s;
+    await backend.saveSettings({ company_name, timezone, required_minutes, half_day_minutes, weekend_mode, annual_leave_days, shift_start, late_grace_minutes, geofence_enabled, office_lat, office_lng,
+      geofence_radius_m, max_gps_accuracy_m, office_end, earliest_checkin, late_marks_per_half_day, reminder_hour, notify_admin_email, whatsapp_group_link, admin_whatsapp_phone, callmebot_apikey });
+    reload(); toast('Settings saved');
+  };
   return <>
     <Top title="Settings" sub="Rules every report is calculated from" />
-    <div className="page" style={{ maxWidth: 820 }}>
+    <div className="page" style={{ maxWidth: 860 }}>
       <section className="card">
-        <h2>Working time</h2>
+        <h2>Office timings</h2>
         <label className="field"><span>Company name</span><input className="input" value={s.company_name} maxLength={80} onChange={e => up('company_name', e.target.value)} /></label>
         <div className="two">
-          <label className="field"><span>Full-day target</span>
-            <select className="input" value={s.required_minutes} onChange={e => { const v = Number(e.target.value); setS({ ...s, required_minutes: v, half_day_minutes: Math.min(s.half_day_minutes, v) }); }}>
+          <label className="field"><span>Office opens (shift start)</span><input className="input" type="time" value={s.shift_start.slice(0, 5)} onChange={e => up('shift_start', e.target.value)} /></label>
+          <label className="field"><span>Office closes</span><input className="input" type="time" value={s.office_end.slice(0, 5)} onChange={e => up('office_end', e.target.value)} /></label>
+          <label className="field"><span>Full-day target <Tip>Hours someone must work for the day to count as “target met” in reports and pie charts.</Tip></span>
+            <select className="input" value={s.required_minutes} onChange={e => { const v = Number(e.target.value); setS(x => ({ ...x, required_minutes: v, half_day_minutes: Math.min(x.half_day_minutes, v) })); }}>
               {[360, 420, 450, 480, 510, 540, 570, 600].map(m => <option key={m} value={m}>{fmtDuration(m)}</option>)}</select></label>
-          <label className="field"><span>Half-day minimum</span>
+          <label className="field"><span>Half-day minimum <Tip>Less than this counts as a half day. Also the target on half-day leave days.</Tip></span>
             <select className="input" value={s.half_day_minutes} onChange={e => up('half_day_minutes', Number(e.target.value))}>
-              {[180, 210, 240, 270, 300].filter(m => m <= s.required_minutes).map(m => <option key={m} value={m}>{fmtDuration(m)}</option>)}</select><small>Also the target on half-day leave days.</small></label>
-          <label className="field"><span>Shift starts</span><input className="input" type="time" value={s.shift_start.slice(0, 5)} onChange={e => up('shift_start', e.target.value)} /></label>
+              {[180, 210, 240, 270, 300].filter(m => m <= s.required_minutes).map(m => <option key={m} value={m}>{fmtDuration(m)}</option>)}</select></label>
           <label className="field"><span>Late after (grace minutes)</span><input className="input" type="number" min={0} max={240} value={s.late_grace_minutes} onChange={e => up('late_grace_minutes', Number(e.target.value))} /></label>
           <label className="field"><span>Weekly off</span>
-            <select className="input" value={s.weekend_mode} onChange={e => up('weekend_mode', e.target.value as Settings['weekend_mode'])}>
+            <select className="input" value={s.weekend_mode} onChange={e => up('weekend_mode', e.target.value as WeekendMode)}>
               <option value="sat_sun">Saturday and Sunday</option><option value="sun">Sunday only</option><option value="none">No weekly off</option></select></label>
           <label className="field"><span>Paid leave per year</span><input className="input" type="number" min={0} max={365} step={0.5} value={s.annual_leave_days} onChange={e => up('annual_leave_days', Number(e.target.value))} /></label>
+          <label className="field"><span>Time zone</span>
+            <select className="input" value={s.timezone} onChange={e => up('timezone', e.target.value)}>
+              {['Asia/Kolkata', 'Asia/Dubai', 'Asia/Singapore', 'Europe/London', 'America/New_York', 'America/Los_Angeles', 'Australia/Sydney'].map(z => <option key={z}>{z}</option>)}</select></label>
         </div>
-        <label className="field"><span>Time zone</span>
-          <select className="input" value={s.timezone} onChange={e => up('timezone', e.target.value)}>
-            {['Asia/Kolkata', 'Asia/Dubai', 'Asia/Singapore', 'Europe/London', 'America/New_York', 'America/Los_Angeles', 'Australia/Sydney'].map(z => <option key={z}>{z}</option>)}
-          </select></label>
+        <p className="small muted">Need different hours for one person (part-time, night shift, 6-day week)? Open them in People → Edit.</p>
       </section>
+
       <section className="card">
-        <h2>Office location check</h2>
-        <label className="check"><input type="checkbox" checked={s.geofence_enabled} onChange={e => up('geofence_enabled', e.target.checked)} />Only allow check-in and check-out at the office</label>
-        <div className="two">
-          <label className="field"><span>Office latitude</span><input className="input" type="number" step="any" value={s.office_lat ?? ''} onChange={e => up('office_lat', e.target.value === '' ? null : Number(e.target.value))} /></label>
-          <label className="field"><span>Office longitude</span><input className="input" type="number" step="any" value={s.office_lng ?? ''} onChange={e => up('office_lng', e.target.value === '' ? null : Number(e.target.value))} /></label>
-          <label className="field"><span>Allowed distance (metres)</span><input className="input" type="number" min={20} max={5000} value={s.geofence_radius_m} onChange={e => up('geofence_radius_m', Number(e.target.value))} /><small>100–200 m works for most buildings.</small></label>
-          <label className="field"><span>Worst GPS accuracy accepted (m)</span><input className="input" type="number" min={5} max={1000} value={s.max_gps_accuracy_m} onChange={e => up('max_gps_accuracy_m', Number(e.target.value))} /></label>
-        </div>
-        <Busy className="btn ghost" run={async () => { const p = await getPosition(); setS({ ...s, office_lat: +p.lat.toFixed(6), office_lng: +p.lng.toFixed(6) }); setGeoMsg(`Got it — accurate to about ${Math.round(p.accuracy)} m. Press Save.`); }}><Icon n="pin" />Use my current location as the office</Busy>
-        {geoMsg && <p className="small muted" style={{ marginTop: 8 }}>{geoMsg}</p>}
+        <h2>Optional rules <small>off unless you turn them on</small></h2>
+        <label className="check"><input type="checkbox" checked={!!s.earliest_checkin} onChange={e => up('earliest_checkin', e.target.checked ? '08:00:00' : null)} />Don’t allow check-in before a set time <Tip>Stops people checking in very early to pad hours.</Tip></label>
+        {s.earliest_checkin && <label className="field" style={{ maxWidth: 240 }}><span>Check-in opens at</span><input className="input" type="time" value={s.earliest_checkin.slice(0, 5)} onChange={e => up('earliest_checkin', e.target.value)} /></label>}
+        <label className="check"><input type="checkbox" checked={s.late_marks_per_half_day > 0} onChange={e => up('late_marks_per_half_day', e.target.checked ? 3 : 0)} />Count late arrivals as half days <Tip>Common in India: e.g. every 3 late marks = ½ day. Shown in reports only; it never changes leave balances automatically.</Tip></label>
+        {s.late_marks_per_half_day > 0 && <label className="field" style={{ maxWidth: 240 }}><span>Late marks per half day</span><input className="input" type="number" min={1} max={31} value={s.late_marks_per_half_day} onChange={e => up('late_marks_per_half_day', Number(e.target.value))} /></label>}
       </section>
-      <div className="row end">
-        <Busy run={async () => {
-          const { company_name, timezone, required_minutes, half_day_minutes, weekend_mode, annual_leave_days, shift_start, late_grace_minutes, geofence_enabled, office_lat, office_lng, geofence_radius_m, max_gps_accuracy_m } = s;
-          if (geofence_enabled && (office_lat == null || office_lng == null)) throw new Error('Set the office location before turning the check on.');
-          await backend.saveSettings({ company_name, timezone, required_minutes, half_day_minutes, weekend_mode, annual_leave_days, shift_start, late_grace_minutes, geofence_enabled, office_lat, office_lng, geofence_radius_m, max_gps_accuracy_m });
-          reloadSettings(); toast('Settings saved');
-        }}>Save settings</Busy>
-      </div>
+
+      <section className="card" id="location">
+        <h2>Office location check <Tip>People can only check in and out inside the circle. Their exact location is never stored — only the distance.</Tip></h2>
+        <label className="check"><input type="checkbox" checked={s.geofence_enabled} onChange={e => up('geofence_enabled', e.target.checked)} />Only allow check-in and check-out at the office</label>
+        <Busy className="btn ghost" run={async () => { const p = await getPosition(); setS(x => ({ ...x, office_lat: +p.lat.toFixed(6), office_lng: +p.lng.toFixed(6) })); setGeoMsg(`Got it — accurate to about ${Math.round(p.accuracy)} m. Drag the pin to fine-tune, then Save.`); }}><Icon n="pin" />Use my current location</Busy>
+        {geoMsg && <p className="small muted" style={{ marginTop: 8 }}>{geoMsg}</p>}
+        <div style={{ margin: '14px 0' }}>
+          <OfficeMap lat={s.office_lat ?? 19.076} lng={s.office_lng ?? 72.8777} radius={s.geofence_radius_m} editable height={300}
+            onPick={(lat, lng) => setS(x => ({ ...x, office_lat: lat, office_lng: lng }))} />
+          <p className="small muted" style={{ marginTop: 6 }}>{s.office_lat == null ? 'Tap the map or “Use my current location” to place the office.' : 'Tap the map or drag the pin to move the office.'}</p>
+        </div>
+        <label className="field"><span>Circle size: <b className="num">{s.geofence_radius_m} m</b> <Tip>100–200 m suits most buildings. Too small and phones indoors may fail; too big and nearby cafés count.</Tip></span>
+          <input className="range" type="range" min={30} max={1000} step={10} value={s.geofence_radius_m} onChange={e => up('geofence_radius_m', Number(e.target.value))} /></label>
+        <label className="field" style={{ maxWidth: 280 }}><span>Worst GPS accuracy accepted (m)</span><input className="input" type="number" min={5} max={1000} value={s.max_gps_accuracy_m} onChange={e => up('max_gps_accuracy_m', Number(e.target.value))} /></label>
+      </section>
+
+      <section className="card" id="whatsapp">
+        <h2>Holiday reminders & WhatsApp</h2>
+        <p className="small muted" style={{ marginBottom: 14 }}>The evening before every holiday you get a reminder with a one-tap button to announce it on the office group. On the day, everyone sees it in PunchIn.</p>
+        <label className="field"><span>Office WhatsApp group invite link <Tip>In WhatsApp: open the group → tap its name → Invite via link → Copy link. Paste it here.</Tip></span>
+          <input className="input" placeholder="https://chat.whatsapp.com/…" value={s.whatsapp_group_link} onChange={e => up('whatsapp_group_link', e.target.value)} /></label>
+        <div className="two">
+          <label className="field"><span>Remind me at</span><select className="input" value={s.reminder_hour} onChange={e => up('reminder_hour', Number(e.target.value))}>{[15, 16, 17, 18, 19, 20, 21].map(h => <option key={h} value={h}>{h > 12 ? h - 12 : h}:00 PM the day before</option>)}</select></label>
+          <label className="check" style={{ alignSelf: 'end', marginBottom: 22 }}><input type="checkbox" checked={s.notify_admin_email} onChange={e => up('notify_admin_email', e.target.checked)} />Also email admins</label>
+        </div>
+        <details style={{ marginBottom: 12 }}><summary className="small" style={{ cursor: 'pointer', fontWeight: 700 }}>Optional: get the reminder on your own WhatsApp too (free)</summary>
+          <ol className="small" style={{ margin: '10px 0 12px 18px', lineHeight: 1.6 }}>
+            <li>Save <b>+34 644 51 95 23</b> in your phone (CallMeBot, a free reminder service).</li>
+            <li>Send it this WhatsApp message: <code>I allow callmebot to send me messages</code></li>
+            <li>It replies with an API key — paste it below with your number.</li>
+          </ol>
+          <div className="two">
+            <label className="field"><span>Your WhatsApp number</span><input className="input" placeholder="+91 98765 43210" value={s.admin_whatsapp_phone} onChange={e => up('admin_whatsapp_phone', e.target.value)} /></label>
+            <label className="field"><span>CallMeBot API key</span><input className="input" value={s.callmebot_apikey} onChange={e => up('callmebot_apikey', e.target.value)} /></label>
+          </div>
+          <p className="small muted">This only messages <b>you</b>. Group posting still needs your one tap — WhatsApp doesn’t allow bots in groups.</p>
+        </details>
+        <Busy className="btn ghost" run={async () => { await save(); const r = await backend.sendTestAlert(); toast(`Test sent: ${r.email} email${r.email === 1 ? '' : 's'}${r.whatsapp ? ' + WhatsApp' : ''}`); }}>Save & send me a test reminder</Busy>
+      </section>
+      <div className="row end"><Busy run={save}>Save settings</Busy></div>
     </div>
   </>;
 }

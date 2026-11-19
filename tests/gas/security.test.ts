@@ -17,7 +17,7 @@ beforeAll(() => {
 
 describe('setup and sign-up', () => {
   it('all tabs exist and the default sheet is gone', () => {
-    expect(g.ss.getSheets().map(s => s.name).sort()).toEqual(['Attendance', 'Audit', 'Fixes', 'Holidays', 'Leave', 'People', 'Refused punches', 'Sessions', 'Settings'].sort());
+    expect(g.ss.getSheets().map(s => s.name).sort()).toEqual(['Attendance', 'Audit', 'Fixes', 'Holidays', 'Leave', 'Notifications', 'People', 'Refused punches', 'Sessions', 'Settings'].sort());
   });
   it('set-up code works once only', () => {
     expect(g.props.get('SETUP_CODE')).toBeUndefined();

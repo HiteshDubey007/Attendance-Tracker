@@ -18,10 +18,11 @@
  *     sheet by anyone (even the owner) are detected.
  * ════════════════════════════════════════════════════════════════════ */
 
-var VERSION = '1.0.0';
+var VERSION = '2.0.0';
 
 var TABLES = {
-  members: ['id', 'email', 'nickname', 'role', 'status', 'created_at', 'pw_hash', 'pw_salt', 'invite_hash', 'invite_expires'],
+  members: ['id', 'email', 'nickname', 'role', 'status', 'created_at', 'pw_hash', 'pw_salt', 'invite_hash', 'invite_expires',
+    'shift_start', 'required_minutes', 'weekend_mode'],
   holidays: ['id', 'holiday_date', 'name'],
   attendance: ['id', 'member_id', 'work_date', 'check_in', 'check_out', 'in_lat', 'in_lng', 'in_accuracy_m', 'in_distance_m',
     'out_lat', 'out_lng', 'out_accuracy_m', 'out_distance_m', 'source', 'edit_reason'],
@@ -31,20 +32,27 @@ var TABLES = {
   sessions: ['id', 'member_id', 'expires', 'created_at'],
   org_settings: ['key', 'value'],
   audit_log: ['id', 'at', 'actor', 'action', 'table_name', 'row_id', 'old_data', 'new_data', 'prev_hash', 'hash'],
+  notifications: ['id', 'audience', 'kind', 'title', 'body', 'link', 'created_at'],
 };
 var NUMERIC = { days: 1, in_lat: 1, in_lng: 1, in_accuracy_m: 1, in_distance_m: 1, out_lat: 1, out_lng: 1, out_accuracy_m: 1, out_distance_m: 1,
-  lat: 1, lng: 1, accuracy_m: 1, distance_m: 1, id_num: 1 };
+  lat: 1, lng: 1, accuracy_m: 1, distance_m: 1, id_num: 1, required_minutes: 1 };
 var BOOL = { half_day: 1 };
 var AUDITED = { members: 1, holidays: 1, attendance: 1, leave_requests: 1, correction_requests: 1, org_settings: 1 };
 var SECRET = ['pw_hash', 'pw_salt', 'invite_hash', 'invite_expires'];
 var TAB_TITLES = { members: 'People', holidays: 'Holidays', attendance: 'Attendance', leave_requests: 'Leave', correction_requests: 'Fixes',
-  punch_attempts: 'Refused punches', sessions: 'Sessions', org_settings: 'Settings', audit_log: 'Audit' };
+  punch_attempts: 'Refused punches', sessions: 'Sessions', org_settings: 'Settings', audit_log: 'Audit', notifications: 'Notifications' };
 
 var DEFAULT_SETTINGS = {
   company_name: 'My Company', timezone: 'Asia/Kolkata', required_minutes: 540, half_day_minutes: 270, weekend_mode: 'sat_sun',
   annual_leave_days: 24, shift_start: '09:30:00', late_grace_minutes: 15, geofence_enabled: false, office_lat: null, office_lng: null,
   geofence_radius_m: 150, max_gps_accuracy_m: 100,
+  // optional rules (off / empty by default)
+  office_end: '18:30:00', earliest_checkin: null, late_marks_per_half_day: 0,
+  // reminders
+  reminder_hour: 18, notify_admin_email: true, whatsapp_group_link: '', admin_whatsapp_phone: '', callmebot_apikey: '',
 };
+// Settings only admins may read (never sent to employees' phones).
+var PRIVATE_SETTINGS = ['admin_whatsapp_phone', 'callmebot_apikey'];
 
 // ───────────── Errors & small helpers ─────────────
 function fail(code, msg) { throw new Error(code + ': ' + msg); }
@@ -56,10 +64,11 @@ function sha256(s) { return hex(Utilities.computeDigest(Utilities.DigestAlgorith
 function trim(s) { return s == null ? '' : String(s).replace(/^\s+|\s+$/g, ''); }
 function addDays(d, n) { var x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
 function isoDow(d) { var w = new Date(d + 'T12:00:00Z').getUTCDay(); return w === 0 ? 7 : w; }
-function isDate(s) { return typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s + 'T00:00:00Z')); }
+function isDate(s) { if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false; var d = new Date(s + 'T00:00:00Z'); return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s; }
 function isTime(s) { return typeof s === 'string' && /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(s); }
 function needDate(s, what) { if (!isDate(s)) fail('BAD_DATES', (what || 'date') + ' is not a valid date'); return s; }
 function hm(t) { return t ? String(t).slice(0, 5) : null; }
+function rnd(x) { return typeof x === 'number' && isFinite(x) ? Math.round(x) : null; }
 function minsBetween(a, b) { return Math.round((new Date(b).getTime() - new Date(a).getTime()) / 60000); }
 function distanceM(lat1, lng1, lat2, lng2) {
   var r = function (x) { return x * Math.PI / 180; };
@@ -77,6 +86,9 @@ Db.prototype.sheet = function (t) {
     sh.getRange('A:Z').setNumberFormat('@');
     sh.getRange(1, 1, 1, TABLES[t].length).setValues([TABLES[t]]);
     sh.setFrozenRows(1);
+  } else if (sh.getLastColumn && sh.getLastColumn() < TABLES[t].length) {
+    // upgrade: new columns are appended at the end, old data stays where it was
+    sh.getRange(1, 1, 1, TABLES[t].length).setValues([TABLES[t]]);
   }
   return (this.sheets[t] = sh);
 };
@@ -156,16 +168,23 @@ function localDate(d, tz) { return Utilities.formatDate(d, tz, 'yyyy-MM-dd'); }
 function localHM(isoStr, tz) { return Utilities.formatDate(new Date(isoStr), tz, 'HH:mm'); }
 function localTs(date, time, tz) { return iso(Utilities.parseDate(date + ' ' + hm(time), tz, 'yyyy-MM-dd HH:mm')); }
 Db.prototype.today = function () { return localDate(now(), this.settings().timezone); };
-Db.prototype.isWeekend = function (d) {
-  var m = this.settings().weekend_mode, w = isoDow(d);
+Db.prototype.isWeekend = function (d, mode) {
+  var m = mode || this.settings().weekend_mode, w = isoDow(d);
   return m === 'sat_sun' ? (w === 6 || w === 7) : m === 'sun' ? w === 7 : false;
 };
 Db.prototype.holidayOn = function (d) {
   if (!this._hol) { var h = {}; this.all('holidays').forEach(function (x) { h[x.holiday_date] = x.name; }); this._hol = h; }
   return this._hol[d] || null;
 };
-Db.prototype.isWorkingDay = function (d) { return !this.isWeekend(d) && !this.holidayOn(d); };
-Db.prototype.workingDaysBetween = function (a, b) { var n = 0; for (var d = a; d <= b; d = addDays(d, 1)) if (this.isWorkingDay(d)) n++; return n; };
+Db.prototype.isWorkingDay = function (d, mode) { return !this.isWeekend(d, mode) && !this.holidayOn(d); };
+Db.prototype.workingDaysBetween = function (a, b, mode) { var n = 0; for (var d = a; d <= b; d = addDays(d, 1)) if (this.isWorkingDay(d, mode)) n++; return n; };
+// A person's working pattern: their own shift if the admin set one, otherwise the office default.
+function sched(db, m) {
+  var s = db.settings(); m = m || {};
+  var own = m.required_minutes !== null && m.required_minutes !== undefined && isFinite(m.required_minutes);
+  return { shift_start: m.shift_start || s.shift_start, required: own ? m.required_minutes : s.required_minutes,
+    half: own ? Math.round(m.required_minutes / 2) : s.half_day_minutes, weekend_mode: m.weekend_mode || s.weekend_mode, custom: !!(own || m.shift_start || m.weekend_mode) };
+}
 
 // ───────────── Auth ─────────────
 function hashPw(pw, salt) { var h = salt + '|' + pw; for (var i = 0; i < 2000; i++) h = sha256(salt + h); return h; }
@@ -202,7 +221,8 @@ function throttle(key) {
 var PUBLIC = { sign_in: 1, sign_up: 1, ping: 1 };
 var WRITES = { sign_in: 1, sign_up: 1, sign_out: 1, punch_in: 1, punch_out: 1, request_leave: 1, cancel_leave: 1, request_correction: 1,
   admin_add_member: 1, admin_update_member: 1, admin_reset_code: 1, admin_set_attendance: 1, admin_delete_attendance: 1,
-  admin_decide_leave: 1, admin_decide_correction: 1, add_holiday: 1, delete_holiday: 1, save_settings: 1 };
+  admin_decide_leave: 1, admin_decide_correction: 1, add_holiday: 1, delete_holiday: 1, save_settings: 1,
+  add_holidays_bulk: 1, send_test_alert: 1 };
 
 function api(req) {
   var lock = null;
@@ -287,7 +307,12 @@ H.sign_out = function (db, me, a) {
   var s = db.find('sessions', sha256(String(a.token || ''))); if (s && s.member_id === me.id) db.remove('sessions', s);
 };
 H.me = function (db, me) { return me.status === 'active' ? strip([me])[0] : null; };
-H.settings = function (db) { return db.settings(); };
+function publicSettings(db, me) {
+  var s = JSON.parse(JSON.stringify(db.settings()));
+  if (!me || me.role !== 'admin') PRIVATE_SETTINGS.forEach(function (k) { s[k] = s[k] ? '••••' : ''; });
+  return s;
+}
+H.settings = function (db, me) { return publicSettings(db, me); };
 H.server_time = function () { return iso(now()); };
 
 // ───────────── Punching ─────────────
@@ -299,17 +324,20 @@ function checkLocation(db, me, kind, lat, lng, acc) {
   if (!okNum(lat) || !okNum(lng) || !okNum(acc) || d === null) why = 'LOCATION_REQUIRED: turn on location to punch';
   else if (acc <= 0 || acc > s.max_gps_accuracy_m) why = 'LOCATION_INACCURATE: GPS accuracy is ' + Math.round(acc) + ' m, needs ' + s.max_gps_accuracy_m + ' m or better. Step near a window and retry.';
   else if (d > s.geofence_radius_m) why = 'OUTSIDE_OFFICE: you are ' + Math.round(d) + ' m from the office (limit ' + s.geofence_radius_m + ' m)';
-  if (why) db.insert('punch_attempts', { id: uuid(), member_id: me.id, attempted_at: iso(now()), kind: kind, lat: okNum(lat) ? lat : null, lng: okNum(lng) ? lng : null, accuracy_m: okNum(acc) ? acc : null, distance_m: d, reason: why });
+  // Privacy: raw coordinates are only used for this check and never stored; only the distance is kept.
+  if (why) db.insert('punch_attempts', { id: uuid(), member_id: me.id, attempted_at: iso(now()), kind: kind, lat: null, lng: null, accuracy_m: okNum(acc) ? Math.round(acc) : null, distance_m: d === null ? null : Math.round(d), reason: why });
   return { distance: d, refusal: why };
 }
 H.punch_in = function (db, me, a) {
   var today = db.today();
   if (db.all('attendance').some(function (r) { return r.member_id === me.id && r.work_date === today; })) fail('ALREADY_PUNCHED_IN', 'you already checked in today');
-  if (db.isWorkingDay(today) && db.all('leave_requests').some(function (l) { return l.member_id === me.id && l.status === 'approved' && !l.half_day && today >= l.start_date && today <= l.end_date; }))
+  var sc = sched(db, me), s = db.settings();
+  if (s.earliest_checkin && localHM(iso(now()), s.timezone) < hm(s.earliest_checkin)) fail('TOO_EARLY', 'check-in opens at ' + hm(s.earliest_checkin));
+  if (db.isWorkingDay(today, sc.weekend_mode) && db.all('leave_requests').some(function (l) { return l.member_id === me.id && l.status === 'approved' && !l.half_day && today >= l.start_date && today <= l.end_date; }))
     fail('ON_LEAVE', 'you are on approved leave today');
   var loc = checkLocation(db, me, 'in', a.p_lat, a.p_lng, a.p_accuracy);
   if (loc.refusal) return { ok: false, error: loc.refusal };
-  var r = db.insert('attendance', { id: uuid(), member_id: me.id, work_date: today, check_in: iso(now()), check_out: null, in_lat: a.p_lat, in_lng: a.p_lng, in_accuracy_m: a.p_accuracy, in_distance_m: loc.distance, source: 'app' });
+  var r = db.insert('attendance', { id: uuid(), member_id: me.id, work_date: today, check_in: iso(now()), check_out: null, in_lat: null, in_lng: null, in_accuracy_m: rnd(a.p_accuracy), in_distance_m: rnd(loc.distance), source: 'app' });
   return { ok: true, attendance: r };
 };
 H.punch_out = function (db, me, a) {
@@ -319,7 +347,7 @@ H.punch_out = function (db, me, a) {
   if (!open) fail('NOT_PUNCHED_IN', 'check in first');
   var loc = checkLocation(db, me, 'out', a.p_lat, a.p_lng, a.p_accuracy);
   if (loc.refusal) return { ok: false, error: loc.refusal };
-  var r = db.update('attendance', open, { check_out: iso(now()), out_lat: a.p_lat, out_lng: a.p_lng, out_accuracy_m: a.p_accuracy, out_distance_m: loc.distance });
+  var r = db.update('attendance', open, { check_out: iso(now()), out_lat: null, out_lng: null, out_accuracy_m: rnd(a.p_accuracy), out_distance_m: rnd(loc.distance) });
   return { ok: true, attendance: r };
 };
 
@@ -344,7 +372,7 @@ H.request_leave = function (db, me, a) {
   if (start.slice(0, 4) !== end.slice(0, 4)) fail('BAD_DATES', 'split leave that crosses a new year into two requests');
   if (start < addDays(db.today(), -30)) fail('BAD_DATES', 'leave can be backdated by at most 30 days');
   if (half && start !== end) fail('BAD_DATES', 'a half day must be a single date');
-  var days = db.workingDaysBetween(start, end) * (half ? 0.5 : 1);
+  var days = db.workingDaysBetween(start, end, sched(db, me).weekend_mode) * (half ? 0.5 : 1);
   if (days === 0) fail('NO_WORKING_DAYS', 'the selected dates are all weekends or holidays');
   if (db.all('leave_requests').some(function (l) { return l.member_id === me.id && (l.status === 'pending' || l.status === 'approved') && !(end < l.start_date || start > l.end_date); }))
     fail('OVERLAP', 'you already have leave on some of these dates');
@@ -387,23 +415,23 @@ H.list = function (db, me, a) {
 
 // ───────────── Reports ─────────────
 function memberDays(db, memberId, from, to) {
-  var s = db.settings(), today = db.today(), tz = s.timezone, out = [];
+  var s = db.settings(), today = db.today(), tz = s.timezone, out = [], sc = sched(db, db.find('members', memberId));
   var att = {}, lv = [];
   db.all('attendance').forEach(function (r) { if (r.member_id === memberId) att[r.work_date] = r; });
   db.all('leave_requests').forEach(function (l) { if (l.member_id === memberId && l.status === 'approved') lv.push(l); });
-  var shiftLimit = hm(s.shift_start).split(':'), lateAfter = Number(shiftLimit[0]) * 60 + Number(shiftLimit[1]) + s.late_grace_minutes;
+  var shiftLimit = hm(sc.shift_start).split(':'), lateAfter = Number(shiftLimit[0]) * 60 + Number(shiftLimit[1]) + s.late_grace_minutes;
   var end = to < today ? to : today;
   for (var d = from; d <= end; d = addDays(d, 1)) {
     var a = att[d] || null, ci = a ? a.check_in : null, co = a ? a.check_out : null;
-    var mins = ci && co ? minsBetween(ci, co) : null, hol = db.holidayOn(d), wk = db.isWeekend(d), l = null;
-    if (db.isWorkingDay(d)) for (var i = 0; i < lv.length; i++) if (d >= lv[i].start_date && d <= lv[i].end_date) { l = lv[i].half_day ? 0.5 : 1; break; }
+    var mins = ci && co ? minsBetween(ci, co) : null, hol = db.holidayOn(d), wk = db.isWeekend(d, sc.weekend_mode), l = null;
+    if (db.isWorkingDay(d, sc.weekend_mode)) for (var i = 0; i < lv.length; i++) if (d >= lv[i].start_date && d <= lv[i].end_date) { l = lv[i].half_day ? 0.5 : 1; break; }
     var kind = ci && !co && d < today ? 'missing_checkout' : ci && !co ? 'working' : ci && l === 0.5 ? 'half_day_leave'
-      : ci && mins >= s.required_minutes ? 'full' : ci && mins >= s.half_day_minutes ? 'short' : ci ? 'half_day'
+      : ci && mins >= sc.required ? 'full' : ci && mins >= sc.half ? 'short' : ci ? 'half_day'
       : l === 1 ? 'leave' : hol ? 'holiday' : wk ? 'weekend' : l === 0.5 ? 'half_day_leave' : d === today ? 'not_yet' : 'absent';
     var late = false;
     if (ci) { var t = localHM(ci, tz).split(':'); late = Number(t[0]) * 60 + Number(t[1]) > lateAfter; }
     out.push({ day: d, kind: kind, check_in: ci, check_out: co, worked_minutes: mins, late: late,
-      fulfilled: mins !== null && mins >= (l === 0.5 ? s.half_day_minutes : s.required_minutes), leave_days: l || 0, holiday: hol });
+      fulfilled: mins !== null && mins >= (l === 0.5 ? sc.half : sc.required), leave_days: l || 0, holiday: hol });
   }
   return out;
 }
@@ -412,10 +440,10 @@ function range(a) {
   if ((Date.parse(to) - Date.parse(from)) / 864e5 > 400) fail('RANGE_TOO_LARGE', 'pick a shorter range');
   return [from, to];
 }
-function summarize(db, days) {
-  var s = { working_days: 0, present_days: 0, fulfilled_days: 0, unfulfilled_days: 0, missing_checkout_days: 0, late_days: 0, leave_days: 0, absent_days: 0, total_minutes: 0 };
+function summarize(db, days, mode) {
+  var s = { late_penalty_days: 0, working_days: 0, present_days: 0, fulfilled_days: 0, unfulfilled_days: 0, missing_checkout_days: 0, late_days: 0, leave_days: 0, absent_days: 0, total_minutes: 0 };
   days.forEach(function (d) {
-    if (db.isWorkingDay(d.day)) s.working_days++;
+    if (db.isWorkingDay(d.day, mode)) s.working_days++;
     if (d.check_in) s.present_days++;
     if (d.fulfilled) s.fulfilled_days++;
     if (d.check_in && !d.fulfilled && d.kind !== 'working') s.unfulfilled_days++;
@@ -424,10 +452,15 @@ function summarize(db, days) {
     if (d.kind === 'absent') s.absent_days++;
     s.leave_days += d.leave_days; s.total_minutes += d.worked_minutes || 0;
   });
+  var n = db.settings().late_marks_per_half_day;
+  if (n > 0) s.late_penalty_days = Math.floor(s.late_days / n) * 0.5;
   return s;
 }
 H.member_days = function (db, me, a) { var r = range(a); return memberDays(db, selfOrAdmin(me, a.p_member), r[0], r[1]); };
-H.member_summary = function (db, me, a) { var r = range(a); return [summarize(db, memberDays(db, selfOrAdmin(me, a.p_member), r[0], r[1]))]; };
+H.member_summary = function (db, me, a) {
+  var r = range(a), id = selfOrAdmin(me, a.p_member);
+  return [summarize(db, memberDays(db, id, r[0], r[1]), sched(db, db.find('members', id)).weekend_mode)];
+};
 H.team_day = function (db, me, a) {
   requireAdmin(me); var d = a.p_day ? needDate(a.p_day) : db.today();
   return db.all('members').filter(function (m) { return m.status === 'active'; }).sort(function (x, y) { return x.nickname.localeCompare(y.nickname); })
@@ -439,7 +472,7 @@ H.team_trend = function (db, me, a) {
     memberDays(db, m.id, r[0], r[1]).forEach(function (d) {
       var x = by[d.day] || (by[d.day] = { day: d.day, present: 0, full_days: 0, on_leave: 0, absent: 0, expected: 0 });
       if (d.check_in) x.present++; if (d.fulfilled) x.full_days++; if (d.kind === 'leave') x.on_leave++; if (d.kind === 'absent') x.absent++;
-      if (db.isWorkingDay(d.day)) x.expected++;
+      if (db.isWorkingDay(d.day, sched(db, m).weekend_mode)) x.expected++;
     });
   });
   return Object.keys(by).sort().map(function (k) { return by[k]; });
@@ -474,7 +507,15 @@ H.admin_update_member = function (db, me, a) {
   var m = db.find('members', a.p_id); if (!m) fail('NOT_FOUND', 'person not found');
   var after = db.all('members').filter(function (x) { return x.id === m.id ? role === 'admin' && status === 'active' : x.role === 'admin' && x.status === 'active'; });
   if (!after.length) fail('NOT_ALLOWED', 'at least one active admin is required');
-  var r = db.update('members', m, { nickname: nick, role: role, status: status });
+  var patch = { nickname: nick, role: role, status: status };
+  if ('p_shift_start' in a) { if (a.p_shift_start && !isTime(a.p_shift_start)) fail('BAD_TIME', 'shift start must look like 09:30'); patch.shift_start = a.p_shift_start ? hm(a.p_shift_start) + ':00' : null; }
+  if ('p_required_minutes' in a) {
+    var rm = a.p_required_minutes === null || a.p_required_minutes === '' ? null : Number(a.p_required_minutes);
+    if (rm !== null && (!isFinite(rm) || rm < 60 || rm > 960)) fail('BAD_HOURS', 'daily hours must be between 1 and 16');
+    patch.required_minutes = rm;
+  }
+  if ('p_weekend_mode' in a) { if (a.p_weekend_mode && ['sat_sun', 'sun', 'none'].indexOf(a.p_weekend_mode) < 0) fail('BAD_INPUT', 'unknown weekly off'); patch.weekend_mode = a.p_weekend_mode || null; }
+  var r = db.update('members', m, patch);
   if (status !== 'active') db.all('sessions').filter(function (s) { return s.member_id === m.id; }).reverse().forEach(function (s) { db.remove('sessions', s); });
   return strip([r])[0];
 };
@@ -537,6 +578,24 @@ H.save_settings = function (db, me, a) {
   ['office_lat', 'office_lng'].forEach(function (k) { if (k in p) next[k] = p[k] === null || p[k] === '' ? null : Number(p[k]); });
   if (next.office_lat !== null && (!(Math.abs(next.office_lat) <= 90) || !(Math.abs(next.office_lng) <= 180))) fail('BAD_SETTING', 'office location is not valid');
   if ('geofence_enabled' in p) next.geofence_enabled = !!p.geofence_enabled;
+  int('late_marks_per_half_day', 0, 31); int('reminder_hour', 0, 23);
+  if ('office_end' in p) { if (!isTime(p.office_end)) fail('BAD_SETTING', 'office end must look like 18:30'); next.office_end = hm(p.office_end) + ':00'; }
+  if ('earliest_checkin' in p) { if (p.earliest_checkin && !isTime(p.earliest_checkin)) fail('BAD_SETTING', 'earliest check-in must look like 08:00'); next.earliest_checkin = p.earliest_checkin ? hm(p.earliest_checkin) + ':00' : null; }
+  if ('notify_admin_email' in p) next.notify_admin_email = !!p.notify_admin_email;
+  if ('whatsapp_group_link' in p) {
+    var g = trim(p.whatsapp_group_link);
+    if (g && !/^https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]{10,40}$/.test(g)) fail('BAD_SETTING', 'paste the group invite link — it starts with https://chat.whatsapp.com/');
+    next.whatsapp_group_link = g;
+  }
+  if ('admin_whatsapp_phone' in p && p.admin_whatsapp_phone !== '••••') {
+    var ph = trim(p.admin_whatsapp_phone).replace(/[\s\-()]/g, '');
+    if (ph && !/^\+?\d{8,15}$/.test(ph)) fail('BAD_SETTING', 'WhatsApp number must be digits with country code, e.g. +919876543210');
+    next.admin_whatsapp_phone = ph ? (ph[0] === '+' ? ph : '+' + ph) : '';
+  }
+  if ('callmebot_apikey' in p && p.callmebot_apikey !== '••••') {
+    var k = trim(p.callmebot_apikey); if (k && !/^[A-Za-z0-9]{4,40}$/.test(k)) fail('BAD_SETTING', 'the CallMeBot key is letters and numbers only');
+    next.callmebot_apikey = k;
+  }
   if (next.geofence_enabled && (next.office_lat === null || next.office_lng === null)) fail('BAD_SETTING', 'set the office location before turning the check on');
   if (next.half_day_minutes > next.required_minutes) fail('BAD_SETTING', 'half day cannot be longer than a full day');
   Object.keys(DEFAULT_SETTINGS).forEach(function (k) {
@@ -545,9 +604,16 @@ H.save_settings = function (db, me, a) {
     if (row) db.update('org_settings', row, { value: JSON.stringify(next[k]) }); else db.insert('org_settings', { key: k, value: JSON.stringify(next[k]) });
   });
   db._settings = null; db._hol = null;
-  return db.settings();
+  return publicSettings(db, me);
 };
 
+function sameRow(expectJson, cur) {
+  if (expectJson === undefined) return false;
+  var e = JSON.parse(expectJson), keys = {}, k;
+  for (k in e) keys[k] = 1; for (k in cur) keys[k] = 1;
+  for (k in keys) if (JSON.stringify(e[k] === undefined ? null : e[k]) !== JSON.stringify(cur[k] === undefined ? null : cur[k])) return false;
+  return true;
+}
 // Checks the hash chain AND replays the log against the live tabs, so direct edits to any tab are caught.
 H.verify_audit_chain = function (db, me) {
   requireAdmin(me);
@@ -564,14 +630,179 @@ H.verify_audit_chain = function (db, me) {
     var expect = state[t] || {}, seen = {};
     var rows = db.all(t);
     for (var j = 0; j < rows.length; j++) {
-      var k = rows[j].id || rows[j].key, cur = JSON.stringify(db.publicRow(t, rows[j]));
+      var k = rows[j].id || rows[j].key, cur = db.publicRow(t, rows[j]);
       seen[k] = 1;
-      if (expect[k] !== cur) return [{ entries: log.length, broken_at: -1, last_hash: prev, problem: TAB_TITLES[t] + ' tab row ' + rows[j]._row + ' was edited directly in the sheet' }];
+      if (!sameRow(expect[k], cur)) return [{ entries: log.length, broken_at: -1, last_hash: prev, problem: TAB_TITLES[t] + ' tab row ' + rows[j]._row + ' was edited directly in the sheet' }];
     }
     for (var k2 in expect) if (!seen[k2]) return [{ entries: log.length, broken_at: -1, last_hash: prev, problem: 'A row was deleted directly from the ' + TAB_TITLES[t] + ' tab' }];
   }
   return [{ entries: log.length, broken_at: null, last_hash: prev, problem: null }];
 };
+
+// ───────────── One-call start-up (keeps the app fast: Apps Script is ~1–2 s per request) ─────────────
+H.bootstrap = function (db, me, a) {
+  var today = db.today(), sc = sched(db, me), ws = addDays(today, -(isoDow(today) - 1)), m0 = today.slice(0, 8) + '01';
+  if (me.role === 'admin' && typeof a.app_url === 'string' && /^https:\/\/[^\s]{5,200}$/.test(a.app_url)) {
+    var props = PropertiesService.getScriptProperties(); if (props.getProperty('APP_URL') !== a.app_url) props.setProperty('APP_URL', a.app_url);
+  }
+  var up = db.all('holidays').filter(function (h) { return h.holiday_date >= today; }).sort(function (x, y) { return x.holiday_date < y.holiday_date ? -1 : 1; }).slice(0, 3);
+  var out = { me: strip([me])[0], settings: publicSettings(db, me), schedule: sc, server_time: iso(now()), today: today,
+    week: memberDays(db, me.id, ws, addDays(ws, 6)), month: summarize(db, memberDays(db, me.id, m0, today), sc.weekend_mode),
+    balance: leaveBalance(db, me.id, Number(today.slice(0, 4))), notifications: notificationsFor(db, me, 30), upcoming_holidays: strip(up) };
+  if (me.role === 'admin') {
+    out.pending = db.all('leave_requests').filter(function (l) { return l.status === 'pending'; }).length + db.all('correction_requests').filter(function (c) { return c.status === 'pending'; }).length;
+    out.setup = { people: db.all('members').filter(function (x) { return x.status === 'active'; }).length, holidays: db.all('holidays').filter(function (h) { return h.holiday_date >= today; }).length,
+      location: db.settings().office_lat !== null, whatsapp: !!db.settings().whatsapp_group_link };
+  }
+  return out;
+};
+
+// ───────────── Holidays: bulk add, public calendar, PDF / photo import ─────────────
+H.add_holidays_bulk = function (db, me, a) {
+  requireAdmin(me);
+  var items = Array.isArray(a.items) ? a.items : []; if (!items.length || items.length > 80) fail('BAD_INPUT', 'send between 1 and 80 holidays');
+  var added = 0, skipped = [];
+  items.forEach(function (it) {
+    var d = it && it.date, n = trim(it && it.name).slice(0, 60);
+    if (!isDate(d) || !n) { skipped.push(String(d)); return; }
+    if (db.holidayOn(d)) { skipped.push(d); return; }
+    db.insert('holidays', { id: uuid(), holiday_date: d, name: n }); db._hol = null; added++;
+  });
+  return { added: added, skipped: skipped };
+};
+// Google's public "Holidays in India" calendar. Observances are listed too, unticked by default.
+H.public_holidays = function (db, me, a) {
+  requireAdmin(me);
+  var y = Number(a.year); if (!(y >= 2000 && y <= 2100)) fail('BAD_INPUT', 'pick a year');
+  var cal = 'en.indian#holiday@group.v.calendar.google.com';
+  var res = Calendar.Events.list(cal, { timeMin: y + '-01-01T00:00:00Z', timeMax: (y + 1) + '-01-01T00:00:00Z', singleEvents: true, orderBy: 'startTime', maxResults: 250 });
+  var seen = {};
+  return (res.items || []).filter(function (e) { return e.start && e.start.date; }).map(function (e) {
+    return { date: e.start.date, name: String(e.summary || 'Holiday').slice(0, 60), gazetted: /public holiday/i.test(e.description || '') };
+  }).filter(function (h) { var k = h.date + h.name; if (seen[k]) return false; seen[k] = 1; return true; });
+};
+// Reads a holiday list from a PDF or photo with Google Drive's free text recognition, then finds the dates.
+// The temporary copy is deleted straight away. The admin reviews the list before anything is saved.
+H.parse_holiday_file = function (db, me, a) {
+  requireAdmin(me);
+  var mimes = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+  if (mimes.indexOf(a.mime) < 0) fail('BAD_FILE', 'upload a PDF, JPG or PNG');
+  if (typeof a.data !== 'string' || a.data.length > 10 * 1024 * 1024) fail('BAD_FILE', 'file must be under 7 MB');
+  var year = Number(a.year) || Number(db.today().slice(0, 4));
+  var blob = Utilities.newBlob(Utilities.base64Decode(a.data), a.mime, 'holidays');
+  var f = Drive.Files.create({ name: 'PunchIn holiday import (temporary)', mimeType: 'application/vnd.google-apps.document' }, blob, { ocrLanguage: 'en', fields: 'id' });
+  var text = '';
+  try { text = DocumentApp.openById(f.id).getBody().getText(); } finally { try { Drive.Files.remove(f.id); } catch (e) { /* ignore */ } }
+  return { items: parseHolidayText(text, year), characters: text.length };
+};
+var MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+function monthOf(w) {
+  w = String(w || '').toLowerCase(); if (w.length < 3) return 0;
+  for (var i = 0; i < 12; i++) if (MONTH_NAMES[i].indexOf(w) === 0) return i + 1;
+  return 0;
+}
+var WEEKDAYS = /\b(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\b\.?/ig;
+var HEADER_WORDS = /^(s\.?\s?no\.?|sr\.?\s?no\.?|sl\.?\s?no\.?|date|day|days|holiday|holidays|occasion|festival|name|list of holidays.*|holiday list.*|\d{4}|month|weekday|remarks?)$/i;
+var ONLY_WEEKDAY = /^(mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(day|nesday|rsday|urday|sday)?\.?$/i;
+// Weekday words are dropped when they sit after the date, in brackets, or alone in a cell — but "Good Friday" stays.
+function cleanName(before, after) {
+  var pre = String(before || '').split(/[|\t]/).map(trim).filter(function (c) { return c && !ONLY_WEEKDAY.test(c); }).join(' ');
+  var post = String(after || '').replace(/\(([^)]*)\)/g, function (m, inner) { return ONLY_WEEKDAY.test(trim(inner)) ? ' ' : m; }).replace(WEEKDAYS, ' ');
+  var t = (pre + ' ' + post).replace(/\(([^)]*)\)/g, function (m, inner) { return ONLY_WEEKDAY.test(trim(inner)) ? ' ' : m; });
+  return trim(t.replace(/[|•·]+/g, ' ').replace(/^\s*(\d{1,3}[.)]?\s+)/, '').replace(/\(\s*\)/g, '')
+    .replace(/\s{2,}/g, ' ').replace(/^[\-–:,./\s]+|[\-–:,./\s]+$/g, ''));
+}
+function findDate(line, defYear) {
+  var m, re, y, mo, d;
+  if ((m = line.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/))) return { y: +m[1], mo: +m[2], d: +m[3], raw: m[0] };
+  if ((m = line.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})\b/))) { y = +m[3]; return { y: y < 100 ? 2000 + y : y, mo: +m[2], d: +m[1], raw: m[0] }; }
+  re = /\b(\d{1,2})(?:st|nd|rd|th)?[\s\-.,]*([A-Za-z]{3,9})\.?(?:[\s\-.,']*(\d{4}|\d{2}\b))?/g;
+  while ((m = re.exec(line))) if (monthOf(m[2])) { y = m[3] ? +m[3] : defYear; return { y: y < 100 ? 2000 + y : y, mo: monthOf(m[2]), d: +m[1], raw: m[0] }; }
+  re = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*(\d{4}))?/g;
+  while ((m = re.exec(line))) if (monthOf(m[1])) return { y: m[3] ? +m[3] : defYear, mo: monthOf(m[1]), d: +m[2], raw: m[0] };
+  return null;
+}
+function parseHolidayText(text, defYear) {
+  var out = [], seen = {}, pending = '';
+  String(text || '').split(/\r?\n/).forEach(function (raw) {
+    var line = String(raw).replace(/\s+/g, ' ').trim(); if (!line) return;
+    var f = findDate(line, defYear);
+    if (!f) { var n0 = cleanName(line, ''); if (n0 && !HEADER_WORDS.test(n0) && /[A-Za-z]{3}/.test(n0)) pending = n0; return; }
+    var date = f.y + '-' + ('0' + f.mo).slice(-2) + '-' + ('0' + f.d).slice(-2);
+    if (!isDate(date) || Number(date.slice(8)) !== f.d || f.y < 2000 || f.y > 2100) return;
+    var at = line.indexOf(f.raw), name = cleanName(line.slice(0, at), line.slice(at + f.raw.length));
+    if (!name || HEADER_WORDS.test(name) || !/[A-Za-z]{3}/.test(name)) name = pending;
+    pending = '';
+    if (!name || seen[date]) return;
+    seen[date] = 1; out.push({ date: date, name: name.slice(0, 60) });
+  });
+  return out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+}
+
+// ───────────── Notifications & reminders ─────────────
+function notify(db, audience, kind, title, body, link) {
+  db.insert('notifications', { id: uuid(), audience: audience, kind: kind, title: String(title).slice(0, 120), body: String(body || '').slice(0, 300), link: link || '', created_at: iso(now()) });
+}
+function notificationsFor(db, me, limit) {
+  return strip(db.all('notifications').filter(function (n) { return n.audience === 'all' || n.audience === me.id || (n.audience === 'admins' && me.role === 'admin'); })
+    .sort(function (x, y) { return x.created_at < y.created_at ? 1 : -1; }).slice(0, limit || 30));
+}
+H.notifications = function (db, me) { return notificationsFor(db, me, 50); };
+function prettyDate(d) { return Utilities.formatDate(new Date(d + 'T12:00:00Z'), 'UTC', 'EEEE, d MMMM'); }
+function holidayMessage(s, date, name) {
+  return '📢 *' + s.company_name + '*: the office is closed on ' + prettyDate(date) + ' for *' + name + '*. Enjoy the holiday! 🎉';
+}
+function appUrl(hash) { var u = PropertiesService.getScriptProperties().getProperty('APP_URL') || ''; return u ? u + (hash || '') : ''; }
+function sendAdminAlerts(db, subject, text, hash) {
+  var s = db.settings(), sent = { email: 0, whatsapp: false }, link = appUrl(hash);
+  var admins = db.all('members').filter(function (m) { return m.role === 'admin' && m.status === 'active'; });
+  if (s.notify_admin_email) admins.forEach(function (m) {
+    try {
+      MailApp.sendEmail({ to: m.email, subject: 'PunchIn: ' + subject, name: 'PunchIn',
+        htmlBody: '<p>' + text.replace(/[<>&]/g, '') + '</p>' + (link ? '<p><a href="' + link + '">Open PunchIn</a></p>' : '') + '<p style="color:#888;font-size:12px">You get this because you are a PunchIn admin. Turn these emails off in PunchIn → Settings.</p>' });
+      sent.email++;
+    } catch (e) { /* quota or bad address: skip */ }
+  });
+  if (s.admin_whatsapp_phone && s.callmebot_apikey) {
+    try {
+      var r = UrlFetchApp.fetch('https://api.callmebot.com/whatsapp.php?phone=' + encodeURIComponent(s.admin_whatsapp_phone) + '&text=' + encodeURIComponent('PunchIn: ' + text + (link ? '\n' + link : '')) + '&apikey=' + encodeURIComponent(s.callmebot_apikey), { muteHttpExceptions: true });
+      sent.whatsapp = r.getResponseCode() === 200;
+    } catch (e) { /* ignore */ }
+  }
+  return sent;
+}
+H.send_test_alert = function (db, me) {
+  requireAdmin(me);
+  var r = sendAdminAlerts(db, 'test alert', 'This is a test from PunchIn. Holiday reminders will look like this.', '#/admin');
+  notify(db, me.id, 'test', 'Test alert', 'If you see this, in-app alerts work.', '');
+  return r;
+};
+// Runs every hour (installed by setup). Each job runs once per day.
+function tick() {
+  var lock = LockService.getScriptLock(); lock.waitLock(25000);
+  try {
+    var db = new Db(spreadsheet()), s = db.settings(), props = PropertiesService.getScriptProperties();
+    var today = db.today(), hour = Number(Utilities.formatDate(now(), s.timezone, 'H'));
+    var once = function (key, fn) { if (props.getProperty(key)) return; fn(); props.setProperty(key, today); };
+    if (hour >= 8) once('am:' + today, function () {
+      var h = db.holidayOn(today);
+      if (h) notify(db, 'all', 'holiday_today', 'Office closed today: ' + h, 'Enjoy the holiday — no check-in needed.', '');
+      var y = addDays(today, -1);
+      db.all('attendance').filter(function (r) { return r.work_date === y && !r.check_out; }).forEach(function (r) {
+        notify(db, r.member_id, 'missing_checkout', 'You didn’t check out yesterday', 'Request a fix so your hours count.', '#/fixes?date=' + y);
+      });
+      var cut = iso(new Date(now().getTime() - 60 * 864e5));
+      db.all('notifications').filter(function (n) { return n.created_at < cut; }).reverse().forEach(function (n) { db.remove('notifications', n); });
+      db.all('sessions').filter(function (x) { return new Date(x.expires) < now(); }).reverse().forEach(function (x) { db.remove('sessions', x); });
+    });
+    if (hour >= s.reminder_hour) once('pm:' + today, function () {
+      var t = addDays(today, 1), h = db.holidayOn(t); if (!h) return;
+      notify(db, 'admins', 'holiday_tomorrow', 'Tomorrow is a holiday: ' + h, 'Tap to post the announcement on the office WhatsApp group.', '#/announce?date=' + t);
+      sendAdminAlerts(db, 'tomorrow is ' + h, 'Tomorrow (' + prettyDate(t) + ') is ' + h + '. Open PunchIn and tap “Announce on WhatsApp” to tell the team.', '#/announce?date=' + t);
+    });
+    props.getKeys().forEach(function (k) { if (/^(am|pm):/.test(k) && k.slice(3) < addDays(today, -7)) props.deleteProperty(k); });
+  } finally { lock.releaseLock(); }
+}
 
 // ───────────── One-time setup (run from the Apps Script editor) ─────────────
 function setup() {
@@ -585,7 +816,9 @@ function setup() {
   if (!db.all('members').length && !code) { code = newCode(); props.setProperty('SETUP_CODE', code); }
   var msg = db.all('members').length ? 'PunchIn is already set up.' : 'PunchIn is ready. Admin set-up code: ' + code +
     '\n\nOpen the PunchIn app → "First time? Set up your account" → use your email, this code and a new password.';
+  // hourly reminder job (holiday announcements, missed check-outs)
+  var has = ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'tick'; });
+  if (!has) ScriptApp.newTrigger('tick').timeBased().everyHours(1).create();
   Logger.log(msg);
-  try { SpreadsheetApp.getUi().alert(msg); } catch (e) { /* not in sheet UI */ }
   return msg;
 }

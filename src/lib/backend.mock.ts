@@ -1,6 +1,6 @@
 // Sample data used only by `npm run build:mock` for automated screenshot tests of every screen.
 // It is never shipped in the real app (see vite.config.ts alias).
-import type { Backend, Day, DayKind, Member, Settings, LeaveRequest, Correction, Holiday } from './types';
+import type { Backend, Boot, Day, DayKind, Member, Settings, LeaveRequest, Correction, Holiday } from './types';
 import { addDays } from './time';
 
 const role = (new URLSearchParams(location.search).get('as') ?? 'admin') as 'admin' | 'employee';
@@ -9,11 +9,14 @@ const settings: Settings = {
   company_name: 'Dot Studio', timezone: 'Asia/Kolkata', required_minutes: 540, half_day_minutes: 270, weekend_mode: 'sat_sun',
   annual_leave_days: 24, shift_start: '09:30:00', late_grace_minutes: 15, geofence_enabled: true,
   office_lat: 19.1136, office_lng: 72.8697, geofence_radius_m: 150, max_gps_accuracy_m: 100,
+  office_end: '18:30:00', earliest_checkin: null, late_marks_per_half_day: 0, reminder_hour: 18, notify_admin_email: true,
+  whatsapp_group_link: '', admin_whatsapp_phone: '', callmebot_apikey: '',
 };
 const names = ['Hitesh', 'Aarav', 'Diya', 'Kabir', 'Meera', 'Rohan', 'Sana', 'Vikram'];
 const members: Member[] = names.map((n, i) => ({
   id: 'm' + i, user_id: 'u' + i, email: n.toLowerCase() + '@dotstudio.in', nickname: n,
   role: i === 0 ? 'admin' : 'employee', status: i === 6 ? 'blocked' : 'active', created_at: '2026-01-05T04:00:00Z',
+  shift_start: i === 3 ? '11:00:00' : null, required_minutes: i === 3 ? 480 : null, weekend_mode: null,
 }));
 const me = role === 'admin' ? members[0] : members[1];
 const holidays: Holiday[] = [
@@ -52,16 +55,27 @@ const leaves: LeaveRequest[] = [
 const corrections: Correction[] = [
   { id: 'c1', member_id: 'm4', work_date: '2026-11-17', requested_check_in: null, requested_check_out: '18:40:00', reason: 'Forgot to check out after the review call', status: 'pending', admin_note: null, created_at: '2026-11-18T04:00:00Z' },
 ];
+const notices = role === 'admin'
+  ? [{ id: 'n1', audience: 'admins', kind: 'holiday_tomorrow', title: 'Tomorrow is a holiday: Guru Nanak Jayanti', body: 'Tap to post the announcement on the office WhatsApp group.', link: '#/announce?date=2026-11-24', created_at: ist(TODAY, 540) }]
+  : [{ id: 'n2', audience: 'm1', kind: 'missing_checkout', title: 'You didn’t check out yesterday', body: 'Request a fix so your hours count.', link: '#/fixes?date=2026-11-18', created_at: ist(TODAY, 495) }];
 const wait = <T,>(v: T) => new Promise<T>(res => setTimeout(() => res(v), 60));
 const mine = <T extends { member_id: string }>(xs: T[], m?: string) => xs.filter(x => role === 'admin' ? (!m || x.member_id === m) : x.member_id === me.id);
 
 export async function initBackend() { return true; }
 export const backend: Backend = {
   configured: true,
-  usesCodes: true,
   onAuth(cb) { const signedIn = !location.search.includes('signedout'); setTimeout(() => cb(signedIn)); return () => {}; },
-  signIn: async () => {}, signUp: async () => {}, resetPassword: async () => {}, signOut: async () => {},
-  me: () => wait(me), settings: () => wait(settings), serverTime: () => wait(ist(TODAY, 600)),
+  signIn: async () => {}, signUp: async () => {}, signOut: async () => {},
+  serverTime: () => wait(ist(TODAY, 600)),
+  notifications: () => wait(notices),
+  async bootstrap() {
+    const week = makeDays(me.id, '2026-11-16', TODAY);
+    const b: Boot = { me, settings, schedule: { shift_start: '09:30:00', required: 540, half: 270, weekend_mode: 'sat_sun', custom: false }, server_time: ist(TODAY, 600), today: TODAY,
+      week, month: await backend.summary(me.id, '2026-11-01', TODAY), balance: { annual: 24, used: 9, pending: 3, remaining: 15 }, notifications: notices,
+      upcoming_holidays: [{ id: 'h9', holiday_date: '2026-11-24', name: 'Guru Nanak Jayanti' }] };
+    if (role === 'admin') { b.pending = 3; b.setup = { people: 7, holidays: 1, location: true, whatsapp: false }; }
+    return wait(b);
+  },
   punch: async () => ({ ok: false, error: 'OUTSIDE_OFFICE: you are 1840 m from the office (limit 150 m)'.replace(/^[A-Z_]+:\s*/, '') }),
   days: (m, f, t) => wait(makeDays(m, f, t)),
   async summary(m, f, t) {
@@ -75,7 +89,12 @@ export const backend: Backend = {
   leaves: (m) => wait(mine(leaves, m)), requestLeave: async () => {}, cancelLeave: async () => {},
   corrections: (m) => wait(mine(corrections, m)), requestCorrection: async () => {},
   holidays: () => wait(holidays),
-  members: () => wait(members), addMember: async () => 'K7QM4XPA', resetCode: async () => 'R2TW9HNE', updateMember: async () => {},
+  members: () => wait(members), addMember: async () => 'K7QM4XPA', resetCode: async () => 'R2TW9HNE',
+  addHolidays: async (items) => ({ added: items.length, skipped: [] }),
+  publicHolidays: async () => wait([{ date: '2027-01-26', name: 'Republic Day', gazetted: true }, { date: '2027-02-14', name: "Valentine's Day", gazetted: false },
+    { date: '2027-03-22', name: 'Holi', gazetted: true }, { date: '2027-08-15', name: 'Independence Day', gazetted: true }]),
+  readHolidayFile: async () => wait([{ date: '2027-01-26', name: 'Republic Day' }, { date: '2027-03-22', name: 'Holi' }, { date: '2027-10-29', name: 'Diwali' }]),
+  sendTestAlert: async () => ({ email: 1, whatsapp: false }), updateMember: async () => {},
   teamDay: () => wait(members.filter(m => m.status === 'active').map((m, i) => {
     const d = makeDays(m.id, TODAY, TODAY)[0];
     const kind = (['working', 'working', 'not_yet', 'working', 'leave', 'working', 'working'] as DayKind[])[i] ?? 'working';

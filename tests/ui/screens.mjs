@@ -11,16 +11,19 @@ const base = 'http://localhost:4179/';
 const browser = await chromium.launch({ executablePath: process.env.CHROME ?? '/usr/bin/google-chrome' });
 const screens = [
   ['login', '?signedout=1#/'],
-  ['emp-today', '?as=employee#/'], ['emp-history', '?as=employee#/history'], ['emp-leave', '?as=employee#/leave'],
+  ['join', '?signedout=1#/join?e=aarav%40dotstudio.in&c=K7QM4XPA'], ['privacy', '?signedout=1#/privacy'],
+  ['emp-today', '?as=employee#/today'], ['emp-history', '?as=employee#/history'], ['emp-leave', '?as=employee#/leave'],
   ['emp-fixes', '?as=employee#/fixes'], ['emp-me', '?as=employee#/me'],
   ['admin-overview', '?as=admin#/admin'], ['admin-people', '?as=admin#/admin/people'], ['admin-records', '?as=admin#/admin/records'],
   ['admin-approvals', '?as=admin#/admin/approvals'], ['admin-holidays', '?as=admin#/admin/holidays'],
-  ['admin-settings', '?as=admin#/admin/settings'], ['admin-security', '?as=admin#/admin/security'], ['admin-more', '?as=admin#/more'],
+  ['admin-settings', '?as=admin#/admin/settings'], ['admin-security', '?as=admin#/admin/security'], ['admin-more', '?as=admin#/more'], ['admin-announce', '?as=admin#/announce?date=2026-11-24'],
 ];
 const sizes = { phone: { width: 390, height: 844, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, laptop: { width: 1366, height: 860 } };
 let failures = 0;
 for (const [sizeName, vp] of Object.entries(sizes)) {
   const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height }, isMobile: vp.isMobile, hasTouch: vp.hasTouch, deviceScaleFactor: vp.deviceScaleFactor ?? 1, timezoneId: 'Asia/Kolkata' });
+  await ctx.addInitScript(() => { for (const k of ['punchin.tour.employee.m1', 'punchin.tour.admin.m0', 'punchin.tour.employee.m0']) localStorage.setItem(k, '1'); });
+  await ctx.route(/tile\.openstreetmap\.org/, r => r.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==', 'base64') }));
   for (const [name, path] of screens) {
     const page = await ctx.newPage(); const errors = [];
     page.on('pageerror', e => errors.push(e.message));
@@ -41,6 +44,7 @@ for (const [sizeName, vp] of Object.entries(sizes)) {
 // Interaction: open the apply-leave sheet on a phone and check the working-day preview
 {
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+  await ctx.addInitScript(() => { for (const k of ['punchin.tour.employee.m1']) localStorage.setItem(k, '1'); });
   const page = await ctx.newPage();
   await page.goto(base + '?as=employee#/leave', { waitUntil: 'networkidle' });
   await page.getByRole('button', { name: 'Apply for leave' }).click();
@@ -52,12 +56,33 @@ for (const [sizeName, vp] of Object.entries(sizes)) {
   console.log(ok ? '✓' : '✗', 'leave preview counts Fri+Mon+Tue = 3 days:', txt);
   if (!ok) failures++;
   await page.screenshot({ path: `${OUT}/phone-emp-leave-form.png` });
-  await page.goto(base + '?as=employee#/', { waitUntil: 'networkidle' });
+  await page.goto(base + '?as=employee#/today', { waitUntil: 'networkidle' });
   await page.locator('.punch').click(); await page.waitForTimeout(400);
+  if (await page.getByRole('button', { name: 'Continue' }).count()) { await page.screenshot({ path: `${OUT}/phone-emp-location-primer.png` }); await page.getByRole('button', { name: 'Continue' }).click(); await page.waitForTimeout(600); }
   const refused = await page.locator('[role=alert]').textContent().catch(() => null);
   console.log(refused ? '✓' : '✗', 'refused punch shows reason:', refused);
   if (!refused) failures++;
   await page.screenshot({ path: `${OUT}/phone-emp-refused.png` });
+  await ctx.close();
+}
+// The first-run guided tour appears by itself and can be stepped through
+{
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+  await ctx.route(/tile\.openstreetmap\.org/, r => r.fulfill({ status: 404 }));
+  const page = await ctx.newPage();
+  await page.goto(base + '?as=employee#/today', { waitUntil: 'networkidle' });
+  const tour = page.getByRole('dialog', { name: /Tour step 1/ });
+  await tour.waitFor({ timeout: 4000 }).catch(() => {});
+  const ok = await tour.count() > 0;
+  console.log(ok ? '✓' : '✗', 'tour starts on first sign-in');
+  if (!ok) failures++;
+  await page.waitForTimeout(500); await page.screenshot({ path: `${OUT}/phone-emp-tour-1.png` });
+  for (let i = 0; i < 2; i++) { await page.getByRole('button', { name: 'Next' }).click(); await page.waitForTimeout(500); }
+  await page.screenshot({ path: `${OUT}/phone-emp-tour-3.png` });
+  await page.getByRole('button', { name: 'Skip tour' }).click();
+  await page.reload({ waitUntil: 'networkidle' }); await page.waitForTimeout(1500);
+  const again = await page.getByRole('dialog', { name: /Tour step/ }).count();
+  console.log(again ? '✗' : '✓', 'tour does not repeat after skipping'); if (again) failures++;
   await ctx.close();
 }
 await browser.close(); server.httpServer.close();

@@ -176,7 +176,7 @@ for (const sc of SCENARIOS) describe(`back-test [${backend}]: ${sc.name}, Jan–
         if (mins >= (lv?.half ? sc.halfMin : sc.requiredMin)) exp.fulfilled_days++; else exp.unfulfilled_days++;
       }
       const [got] = await db.rpc(adminU, 'member_summary', { p_member: p.id, p_from: from, p_to: to });
-      const norm = Object.fromEntries(Object.entries(got).map(([k, v]) => [k, Number(v)]));
+      const norm = Object.fromEntries(Object.keys(exp).map(k => [k, Number((got as any)[k])]));
       expect(norm, `${p.id} month ${mo}`).toEqual(exp);
       compared++;
     }

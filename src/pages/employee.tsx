@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { backend } from '@backend';
-import { useApp } from '../App';
-import type { Day, LeaveType } from '../lib/types';
-import { addDays, countWorkingDays, fmtDate, fmtDuration, getPosition, hhmmInTz, minutesBetween, monthRange, pct, timeInTz } from '../lib/time';
+import { useApp, TopActions } from '../App';
+import type { Day, GeoFix, LeaveType } from '../lib/types';
+import { addDays, countWorkingDays, distanceM, fmtDate, fmtDuration, getPosition, hhmmInTz, minutesBetween, monthRange, pct, timeInTz } from '../lib/time';
+import { InstallSteps, LocationPrimer, OfficeMap, forget, locationExplained, useInstall } from '../extras';
 import { Busy, C, Donut, Empty, Icon, Modal, Pill, Seg, StatusPill, useLoad, useToast } from '../ui';
 
 export function Top({ title, sub, children }: { title: string; sub?: string; children?: React.ReactNode }) {
-  return <header className="top"><div><h1>{title}</h1>{sub && <p>{sub}</p>}</div>{children && <div className="row">{children}</div>}</header>;
+  return <header className="top"><div><h1>{title}</h1>{sub && <p>{sub}</p>}</div><div className="row">{children}<TopActions /></div></header>;
 }
 
 /** Ticking clock aligned to the server (so the dial never trusts a wrong phone clock). */
@@ -22,46 +23,59 @@ function greeting(h: number) { return h < 12 ? 'Good morning' : h < 17 ? 'Good a
 
 // ═════════════ Today ═════════════
 export function TodayPage() {
-  const { me, settings, today } = useApp(); const tz = settings.timezone; const toast = useToast();
+  const { me, settings, today, week, month: s, balance, schedule, upcoming_holidays, reload } = useApp(); const tz = settings.timezone; const toast = useToast();
   const now = useServerNow();
   const weekStart = addDays(today, -((new Date(today + 'T12:00:00Z').getUTCDay() + 6) % 7));
-  const [from, to] = monthRange(today.slice(0, 7));
-  const week = useLoad(() => backend.days(me.id, weekStart, addDays(weekStart, 6)), [me.id, weekStart]);
-  const month = useLoad(() => backend.summary(me.id, from, to), [me.id, from]);
-  const bal = useLoad(() => backend.balance(), [me.id]);
   const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  const [primer, setPrimer] = useState(false);
+  const [fix, setFix] = useState<GeoFix | null>(null); const [locating, setLocating] = useState(false);
+  const install = useInstall();
 
-  const d: Day | undefined = week.data?.find(x => x.day === today);
+  const d: Day | undefined = week.find(x => x.day === today);
   const working = !!d?.check_in && !d?.check_out;
   const done = !!d?.check_out;
   const worked = d?.check_in ? (d.check_out ? minutesBetween(d.check_in, d.check_out) : minutesBetween(d.check_in, now.toISOString())) : 0;
-  const target = d?.kind === 'half_day_leave' ? settings.half_day_minutes : settings.required_minutes;
+  const target = d?.kind === 'half_day_leave' ? schedule.half : schedule.required;
   const progress = Math.min(1, worked / target);
   const leftMin = Math.max(0, target - worked);
+  const geo = settings.geofence_enabled && settings.office_lat !== null && settings.office_lng !== null;
+  const dist = fix && geo ? Math.round(distanceM(settings.office_lat!, settings.office_lng!, fix.lat, fix.lng)) : null;
+  const inside = dist !== null && dist <= settings.geofence_radius_m && fix!.accuracy <= settings.max_gps_accuracy_m;
 
+  async function locate() {
+    setLocating(true); setErr(null);
+    try { const f = await getPosition(); setFix(f); return f; } catch (e: any) { setErr(e.message); return null; } finally { setLocating(false); }
+  }
   async function punch() {
+    if (geo && !locationExplained()) { setPrimer(true); return; }
     setBusy(true); setErr(null);
     try {
-      let fix = null;
-      if (settings.geofence_enabled) fix = await getPosition();
-      const r = await backend.punch(working ? 'out' : 'in', fix);
+      let f: GeoFix | null = null;
+      if (geo) { f = await locate(); if (!f) { setBusy(false); return; } }
+      const r = await backend.punch(working ? 'out' : 'in', f);
       if (!r.ok) setErr(r.error ?? 'Punch refused');
-      else { toast(working ? 'Checked out. See you tomorrow.' : 'Checked in. Have a good day.'); week.reload(); month.reload(); }
+      else { toast(working ? 'Checked out. See you tomorrow.' : 'Checked in. Have a good day.'); reload(); }
     } catch (e: any) { setErr(e.message); }
     setBusy(false);
   }
 
   const R = 46, CIRC = 2 * Math.PI * R;
   const offDay = d && ['weekend', 'holiday', 'leave'].includes(d.kind) && !d.check_in;
-  const s = month.data;
+  const days = week.concat(Array.from({ length: Math.max(0, 7 - week.length) }, (_, i) => ({ day: addDays(weekStart, week.length + i) } as Day)));
+  const nextHol = upcoming_holidays[0];
   return <>
     <Top title={`${greeting(Number(hhmmInTz(now.toISOString(), tz).slice(0, 2)))}, ${me.nickname}`}
       sub={new Date(today + 'T12:00:00Z').toLocaleDateString('en-IN', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' })} />
     <div className="page">
+      {!install.installed && (install.canPrompt || /iphone|ipad|android/i.test(navigator.userAgent)) && <div className="banner">
+        <img src="./icon-192.png" alt="" width={40} height={40} style={{ borderRadius: 10 }} />
+        <div className="grow"><b>Get the PunchIn app</b><span>One tap from your home screen, full screen, no browser.</span></div>
+        {install.canPrompt ? <button className="btn primary sm" onClick={() => install.prompt()}>Install</button> : <Link className="btn ghost sm" to="/me">How</Link>}
+      </div>}
       <div className="grid g-today">
         <section className="card dial-card" aria-label="Today's punch">
           <div className="clock">Office time <b className="num">{timeInTz(now.toISOString(), tz)}</b></div>
-          <div className="dial">
+          <div className="dial" data-tour="punch">
             <svg viewBox="0 0 100 100" aria-hidden>
               <circle cx="50" cy="50" r={R} fill="none" stroke={C.canvas} strokeWidth="7" />
               <circle className="ring-fill" cx="50" cy="50" r={R} fill="none" stroke={progress >= 1 ? C.good : C.orange} strokeWidth="7" strokeLinecap="round"
@@ -70,8 +84,8 @@ export function TodayPage() {
             <div className="center">
               {done
                 ? <div className="punch done" role="img" aria-label={`Worked ${fmtDuration(worked)}`}><span className="big num">{fmtDuration(worked)}</span><span className="sm">{progress >= 1 ? 'Target met' : `${fmtDuration(leftMin)} short`}</span></div>
-                : <button className={`punch ${working ? 'out' : ''}`} onClick={punch} disabled={busy || !week.data}>
-                    <span className="big">{busy ? (settings.geofence_enabled ? 'Locating…' : '…') : working ? 'Check out' : 'Check in'}</span>
+                : <button className={`punch ${working ? 'out' : ''}`} onClick={punch} disabled={busy}>
+                    <span className="big">{busy ? (geo ? 'Locating…' : '…') : working ? 'Check out' : 'Check in'}</span>
                     <span className="sm num">{working ? `${fmtDuration(worked)} so far` : offDay ? (d!.holiday ?? (d!.kind === 'leave' ? 'On leave' : 'Day off')) : 'Tap to start'}</span>
                   </button>}
             </div>
@@ -79,44 +93,56 @@ export function TodayPage() {
           <div className="dial-meta num">
             <div><b>{timeInTz(d?.check_in, tz)}</b>In</div>
             <div><b>{timeInTz(d?.check_out, tz)}</b>Out</div>
-            <div><b>{Math.round(progress * 100)}%</b>of {settings.required_minutes / 60}h</div>
+            <div><b>{Math.round(progress * 100)}%</b>of {+(target / 60).toFixed(1)}h</div>
           </div>
           {err && <div className="note bad" style={{ marginTop: 14, position: 'relative' }} role="alert"><Icon n="alert" />{err}</div>}
-          {settings.geofence_enabled && !err && <div className="geo-note"><Icon n="pin" />Checks your location against the office</div>}
-          {working && leftMin > 0 && <p className="small muted" style={{ marginTop: 6, position: 'relative' }}>Target reached at about {timeInTz(new Date(now.getTime() + leftMin * 60000).toISOString(), tz)}</p>}
+          {working && leftMin > 0 && <p className="small muted" style={{ marginTop: 8, position: 'relative' }}>Target reached at about {timeInTz(new Date(now.getTime() + leftMin * 60000).toISOString(), tz)}</p>}
+          {schedule.custom && <p className="small muted" style={{ marginTop: 6, position: 'relative' }}>Your shift: from {schedule.shift_start.slice(0, 5)}, {fmtDuration(schedule.required)} a day</p>}
         </section>
 
         <div className="grid" style={{ alignContent: 'start' }}>
-          <section className="card">
+          {geo && <section className="card" data-tour="map">
+            <h2>Office area <small>check-in works inside the circle</small></h2>
+            <OfficeMap lat={settings.office_lat!} lng={settings.office_lng!} radius={settings.geofence_radius_m} me={fix} />
+            <div className="geo-status">
+              {fix ? <><span className="dot" style={{ background: inside ? 'var(--good)' : 'var(--bad)' }} />
+                {inside ? `You’re inside — ${dist} m from the office` : fix.accuracy > settings.max_gps_accuracy_m ? `GPS is too vague (±${Math.round(fix.accuracy)} m). Move near a window.` : `You’re ${dist} m away — need to be within ${settings.geofence_radius_m} m`}</>
+                : <span className="muted">Radius {settings.geofence_radius_m} m around the office.</span>}
+              <button className="btn ghost sm" style={{ marginLeft: 'auto' }} onClick={() => (locationExplained() ? locate() : setPrimer(true))} disabled={locating}><Icon n="pin" />{locating ? 'Finding you…' : 'Am I inside?'}</button>
+            </div>
+          </section>}
+          <section className="card" data-tour="week">
             <h2>This week <small>{fmtDate(weekStart)} – {fmtDate(addDays(weekStart, 6))}</small></h2>
             <div className="week">
-              {(week.data ?? []).concat(Array.from({ length: 7 - (week.data?.length ?? 0) }, (_, i) => ({ day: addDays(weekStart, (week.data?.length ?? 0) + i) } as Day))).map(w => {
+              {days.map(w => {
                 const mins = w.worked_minutes ?? (w.day === today && w.check_in ? worked : 0);
                 return <div key={w.day} className={`wd ${w.day === today ? 'today' : ''} ${['weekend', 'holiday'].includes(w.kind) ? 'off' : ''}`} title={w.kind}>
                   <div className="n">{new Date(w.day + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' }).slice(0, 2)}</div>
                   <div className="d">{Number(w.day.slice(8))}</div>
-                  <div className="bar"><i style={{ width: `${Math.min(100, (mins / settings.required_minutes) * 100)}%`, background: w.kind === 'full' ? C.good : undefined }} /></div>
+                  <div className="bar"><i style={{ width: `${Math.min(100, (mins / schedule.required) * 100)}%`, background: w.kind === 'full' ? C.good : undefined }} /></div>
                   <div className="h num">{mins ? (mins / 60).toFixed(1) : w.kind === 'leave' ? 'L' : w.kind === 'holiday' ? 'H' : '–'}</div>
                 </div>;
               })}
             </div>
+            {nextHol && <p className="small" style={{ marginTop: 12 }}>🎉 Next holiday: <b>{nextHol.name}</b>, {fmtDate(nextHol.holiday_date, { weekday: 'short', day: 'numeric', month: 'short' })}</p>}
           </section>
-          <section className="card">
+          <section className="card" data-tour="month">
             <h2>{new Date(today + 'T12:00:00Z').toLocaleDateString('en-IN', { month: 'long', timeZone: 'UTC' })} so far <Link to="/history" className="small" style={{ color: 'var(--orange-ink)' }}>Details</Link></h2>
             <div className="donut-wrap">
-              <Donut size={150} parts={[{ label: 'Met target', value: s?.fulfilled_days ?? 0, color: C.orange }, { label: 'Below target', value: s?.unfulfilled_days ?? 0, color: C.orangeSoft }]}
-                center={<div><div className="display num" style={{ fontSize: 28, fontWeight: 800 }}>{pct(s?.fulfilled_days ?? 0, (s?.fulfilled_days ?? 0) + (s?.unfulfilled_days ?? 0))}%</div><div className="small muted">days on target</div></div>} />
+              <Donut size={150} parts={[{ label: 'Met target', value: s.fulfilled_days, color: C.orange }, { label: 'Below target', value: s.unfulfilled_days, color: C.orangeSoft }]}
+                center={<div><div className="display num" style={{ fontSize: 28, fontWeight: 800 }}>{pct(s.fulfilled_days, s.fulfilled_days + s.unfulfilled_days)}%</div><div className="small muted">days on target</div></div>} />
               <div className="legend num">
-                <div><i style={{ background: C.orange }} />Met {settings.required_minutes / 60}h<b>{s?.fulfilled_days ?? '–'}</b></div>
-                <div><i style={{ background: C.orangeSoft }} />Below target<b>{s?.unfulfilled_days ?? '–'}</b></div>
-                <div><i style={{ background: C.line }} />Late arrivals<b>{s?.late_days ?? '–'}</b></div>
-                <div><i style={{ background: C.line }} />Leave left<b>{bal.data?.remaining ?? '–'}</b></div>
+                <div><i style={{ background: C.orange }} />Met target<b>{s.fulfilled_days}</b></div>
+                <div><i style={{ background: C.orangeSoft }} />Below target<b>{s.unfulfilled_days}</b></div>
+                <div><i style={{ background: C.line }} />Late arrivals<b>{s.late_days}</b></div>
+                <div><i style={{ background: C.line }} />Leave left<b>{balance.remaining}</b></div>
               </div>
             </div>
           </section>
         </div>
       </div>
     </div>
+    {primer && <LocationPrimer onCancel={() => setPrimer(false)} onOk={() => { setPrimer(false); punch(); }} />}
   </>;
 }
 
@@ -279,9 +305,7 @@ function FixForm({ today, date: d0, onClose, onDone }: { today: string; date: st
 
 // ═════════════ Me ═════════════
 export function MePage() {
-  const { me, settings } = useApp();
-  const ios = useMemo(() => /iphone|ipad|ipod/i.test(navigator.userAgent), []);
-  const standalone = typeof matchMedia !== 'undefined' && matchMedia('(display-mode: standalone)').matches;
+  const { me, settings, schedule, startTour } = useApp(); const nav = useNavigate();
   return <>
     <Top title="Me" />
     <div className="page" style={{ maxWidth: 720 }}>
@@ -292,25 +316,89 @@ export function MePage() {
         </div>
       </section>
       <section className="card">
-        <h2>Office rules</h2>
+        <h2>Install the app</h2>
+        <InstallSteps />
+      </section>
+      <section className="card">
+        <h2>My working rules</h2>
         <div className="list small">
-          <div className="item"><div className="grow">Daily target</div><b>{fmtDuration(settings.required_minutes)}</b></div>
-          <div className="item"><div className="grow">Shift starts</div><b>{settings.shift_start.slice(0, 5)} <span className="muted">(+{settings.late_grace_minutes} min grace)</span></b></div>
-          <div className="item"><div className="grow">Weekly off</div><b>{{ sat_sun: 'Saturday & Sunday', sun: 'Sunday', none: 'None' }[settings.weekend_mode]}</b></div>
+          <div className="item"><div className="grow">Daily target</div><b>{fmtDuration(schedule.required)}</b></div>
+          <div className="item"><div className="grow">Shift starts</div><b>{schedule.shift_start.slice(0, 5)} <span className="muted">(+{settings.late_grace_minutes} min grace)</span></b></div>
+          <div className="item"><div className="grow">Weekly off</div><b>{{ sat_sun: 'Saturday & Sunday', sun: 'Sunday', none: 'None' }[schedule.weekend_mode]}</b></div>
+          {settings.earliest_checkin && <div className="item"><div className="grow">Check-in opens</div><b>{settings.earliest_checkin.slice(0, 5)}</b></div>}
           <div className="item"><div className="grow">Location check</div><b>{settings.geofence_enabled ? `On (within ${settings.geofence_radius_m} m)` : 'Off'}</b></div>
         </div>
       </section>
-      {!standalone && <section className="card">
-        <h2>Install on your phone</h2>
-        <p className="small muted">{ios ? 'In Safari, tap the Share button, then “Add to Home Screen”.' : 'In Chrome, open the ⋮ menu and tap “Install app” or “Add to Home screen”.'} PunchIn then opens full-screen like a normal app.</p>
-      </section>}
-      <section className="card"><button className="btn ghost" onClick={() => backend.signOut()}><Icon n="out" />Sign out</button></section>
       <section className="card">
-        <details className="about"><summary>About PunchIn <span className="muted small">v1.0</span></summary>
+        <h2>Help</h2>
+        <div className="row">
+          <button className="btn ghost" onClick={() => { forget('punchin.tour.'); nav(me.role === 'admin' ? '/admin' : '/today'); setTimeout(startTour, 400); }}>Show me around again</button>
+          <Link className="btn ghost" to="/privacy">Privacy & permissions</Link>
+          <button className="btn ghost" onClick={() => backend.signOut()}><Icon n="out" />Sign out</button>
+        </div>
+      </section>
+      <section className="card">
+        <details className="about"><summary>About PunchIn <span className="muted small">v2.0</span></summary>
           <p className="small muted" style={{ marginTop: 10 }}>Attendance, leave and hours for {settings.company_name}. Check-in times are recorded by the server and every change is kept in a tamper-evident audit log.</p>
           <p className="credit" style={{ marginTop: 8 }}>Developed by Hitesh Dubey</p>
         </details>
       </section>
+    </div>
+  </>;
+}
+
+// ═════════════ Privacy (also reachable before sign-in) ═════════════
+export function PrivacyPage({ standalone }: { standalone?: boolean }) {
+  const body = <div className="card" style={{ lineHeight: 1.6 }}>
+    <h2>What PunchIn collects</h2>
+    <ul className="checklist" style={{ marginBottom: 16 }}>
+      <li><Icon n="check" />Your office email, the nickname your admin gave you, and your password (stored only as a salted hash — nobody can read it).</li>
+      <li><Icon n="check" />Check-in and check-out times, stamped by the server.</li>
+      <li><Icon n="check" />Leave requests, fix requests and the reasons you type.</li>
+      <li><Icon n="check" />If your office turned on the location check: your distance from the office (e.g. “42 m”) and GPS accuracy at the moment you tap. <b>Your exact coordinates are never stored.</b></li>
+    </ul>
+    <h2>What PunchIn never does</h2>
+    <ul className="checklist" style={{ marginBottom: 16 }}>
+      <li><Icon n="x" />No camera, microphone, contacts, photos, files, Bluetooth or background location.</li>
+      <li><Icon n="x" />No tracking, ads, analytics or third-party cookies.</li>
+      <li><Icon n="x" />Your location is only read when you tap Check in, Check out or “Am I inside?”.</li>
+    </ul>
+    <h2>Who can see your data</h2>
+    <p className="small" style={{ marginBottom: 12 }}>You see only your own records. Your office admins can see everyone’s attendance and leave. Data is stored in your organisation’s private Google Sheet, which is not shared with staff. Every change is logged in a tamper-evident audit trail.</p>
+    <h2>Your rights</h2>
+    <p className="small">You can see all your records in History and Leave. To correct something, use Fixes. To have your account removed, ask your admin. Records are kept as long as your organisation needs them for attendance and payroll.</p>
+    <p className="small muted" style={{ marginTop: 12 }}>Map tiles © OpenStreetMap contributors — loaded only when a map is shown.</p>
+  </div>;
+  if (standalone) return <><header className="top" style={{ padding: '24px 0 8px' }}><div><h1>Privacy</h1><p>Plain-language summary</p></div><a className="btn ghost" href="#/">Back</a></header>{body}</>;
+  return <><Top title="Privacy" sub="Plain-language summary" /><div className="page" style={{ maxWidth: 760 }}>{body}</div></>;
+}
+
+// ═════════════ Announce a holiday on WhatsApp (admin) ═════════════
+export function AnnouncePage() {
+  const { settings, today } = useApp(); const toast = useToast();
+  const q = new URLSearchParams(useLocation().search);
+  const hol = useLoad(() => backend.holidays(), []);
+  const date = q.get('date') ?? addDays(today, 1);
+  const h = hol.data?.find(x => x.holiday_date === date);
+  const text = h ? `📢 *${settings.company_name}*: the office is closed on ${fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' })} for *${h.name}*. Enjoy the holiday! 🎉` : '';
+  const copyOpen = async () => {
+    try { await navigator.clipboard.writeText(text); toast('Message copied — paste it in the group'); } catch { toast('Copy the message above, then paste it in the group'); }
+    if (settings.whatsapp_group_link) window.open(settings.whatsapp_group_link, '_blank', 'noopener');
+  };
+  return <>
+    <Top title="Announce holiday" sub="Tell the team on WhatsApp in one tap" />
+    <div className="page" style={{ maxWidth: 640 }}>
+      {hol.loading ? <div className="spinner" /> : !h ? <Empty title="No holiday on that date">Pick one from Holidays.</Empty> : <section className="card">
+        <h2>{h.name} <small>{fmtDate(date, { weekday: 'long', day: 'numeric', month: 'long' })}</small></h2>
+        <div className="msg-preview" style={{ marginBottom: 16 }}>{text.replace(/\*/g, '')}</div>
+        <div className="grid" style={{ gap: 10 }}>
+          {settings.whatsapp_group_link
+            ? <button className="btn primary block" onClick={copyOpen}>Copy message & open office group</button>
+            : <Link className="btn ghost block" to="/admin/settings#whatsapp">Link your office WhatsApp group first</Link>}
+          <a className="btn ghost block" href={`https://wa.me/?text=${encodeURIComponent(text)}`} target="_blank" rel="noopener noreferrer">Share on WhatsApp (pick the group)</a>
+        </div>
+        <p className="small muted" style={{ marginTop: 12 }}>WhatsApp doesn’t let apps post into groups by themselves, so you press Send. Everyone also sees the holiday in PunchIn on the day.</p>
+      </section>}
     </div>
   </>;
 }
