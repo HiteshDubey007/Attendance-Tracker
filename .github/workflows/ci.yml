@@ -1,0 +1,47 @@
+# Every push: run all tests (database security, 6-month back-test, logic, every screen),
+# and only if all pass, publish the app to GitHub Pages.
+name: Test and deploy
+on:
+  push: { branches: [main] }
+  pull_request:
+  workflow_dispatch:
+permissions: { contents: read, pages: write, id-token: write }
+concurrency: { group: pages, cancel-in-progress: false }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: test }
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env: { PGHOST: localhost, PGPORT: '5432', PGUSER: postgres, PGPASSWORD: test }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Database security tests, back-test and logic tests
+        run: npm test
+      - name: Build
+        run: npm run build && npm run build:mock
+      - name: Screen tests (phone + laptop)
+        run: npm run test:ui
+        env: { CHROME: /usr/bin/google-chrome }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: screenshots, path: tests/ui/shots }
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: dist }
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: { name: github-pages, url: '${{ steps.d.outputs.page_url }}' }
+    steps:
+      - uses: actions/configure-pages@v5
+        with: { enablement: true }
+        continue-on-error: true
+      - id: d
+        uses: actions/deploy-pages@v4
