@@ -16,7 +16,7 @@ export interface Settings {
   shift_start: string; late_grace_minutes: number;
   geofence_enabled: boolean; office_lat: number | null; office_lng: number | null;
   geofence_radius_m: number; max_gps_accuracy_m: number;
-  office_end: string; earliest_checkin: string | null; late_marks_per_half_day: number;
+  office_end: string; earliest_checkin: string | null; late_marks_per_half_day: number; allow_wfh: boolean;
   reminder_hour: number; notify_admin_email: boolean; whatsapp_group_link: string; admin_whatsapp_phone: string; callmebot_apikey: string;
 }
 
@@ -26,6 +26,7 @@ export type DayKind = 'full' | 'short' | 'half_day' | 'working' | 'missing_check
 export interface Day {
   day: string; kind: DayKind; check_in: string | null; check_out: string | null;
   worked_minutes: number | null; late: boolean; fulfilled: boolean; leave_days: number; holiday: string | null;
+  break_minutes?: number; wfh?: boolean;
 }
 
 export interface Summary {
@@ -35,7 +36,7 @@ export interface Summary {
 
 export interface Attendance {
   id: string; member_id: string; work_date: string; check_in: string; check_out: string | null;
-  in_distance_m: number | null; out_distance_m: number | null; source: 'app' | 'admin' | 'correction'; edit_reason: string | null;
+  in_distance_m: number | null; out_distance_m: number | null; source: 'app' | 'admin' | 'correction'; edit_reason: string | null; break_minutes?: number | null; wfh?: boolean;
 }
 
 export type LeaveType = 'casual' | 'sick' | 'earned' | 'unpaid';
@@ -54,7 +55,7 @@ export interface Correction {
 
 export interface Balance { annual: number; used: number; pending: number; remaining: number }
 export interface Holiday { id: string; holiday_date: string; name: string }
-export interface TeamRow { member_id: string; nickname: string; email: string; kind: DayKind; check_in: string | null; check_out: string | null; worked_minutes: number | null; late: boolean }
+export interface TeamRow { member_id: string; nickname: string; email: string; kind: DayKind; check_in: string | null; check_out: string | null; worked_minutes: number | null; late: boolean; wfh?: boolean }
 export interface TrendRow { day: string; present: number; full_days: number; on_leave: number; absent: number; expected: number }
 export interface PunchAttempt { id: string; member_id: string; attempted_at: string; kind: 'in' | 'out'; distance_m: number | null; accuracy_m: number | null; reason: string }
 export interface AuditEntry { id: number; at: string; actor: string | null; action: string; table_name: string; row_id: string | null; old_data: any; new_data: any; hash: string }
@@ -64,6 +65,7 @@ export interface Notice { id: string; audience: string; kind: string; title: str
 export interface Boot {
   me: Member; settings: Settings; schedule: Schedule; server_time: string; today: string;
   week: Day[]; month: Summary; balance: Balance; notifications: Notice[]; upcoming_holidays: Holiday[];
+  open?: Attendance | null;
   pending?: number; setup?: { people: number; holidays: number; location: boolean; whatsapp: boolean };
 }
 export interface HolidayCandidate { date: string; name: string; gazetted?: boolean }
@@ -76,10 +78,12 @@ export interface Backend {
   signUp(email: string, password: string, code: string): Promise<void>;
   signOut(): Promise<void>;
   bootstrap(): Promise<Boot | null>;
+  orgName(): Promise<string | null>;
+  inviteLink(email: string, code: string): string;
   serverTime(): Promise<string>;
   notifications(): Promise<Notice[]>;
 
-  punch(kind: 'in' | 'out', fix: GeoFix | null): Promise<{ ok: boolean; error?: string }>;
+  punch(kind: 'in' | 'out', fix: GeoFix | null, opts?: { wfh?: boolean; resume?: boolean }): Promise<{ ok: boolean; error?: string; wfh_allowed?: boolean }>;
   days(member: string, from: string, to: string): Promise<Day[]>;
   summary(member: string, from: string, to: string): Promise<Summary>;
   balance(member?: string, year?: number): Promise<Balance>;

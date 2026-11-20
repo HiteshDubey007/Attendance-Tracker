@@ -18,14 +18,14 @@
  *     sheet by anyone (even the owner) are detected.
  * ════════════════════════════════════════════════════════════════════ */
 
-var VERSION = '2.0.0';
+var VERSION = '2.1.0';
 
 var TABLES = {
   members: ['id', 'email', 'nickname', 'role', 'status', 'created_at', 'pw_hash', 'pw_salt', 'invite_hash', 'invite_expires',
     'shift_start', 'required_minutes', 'weekend_mode'],
   holidays: ['id', 'holiday_date', 'name'],
   attendance: ['id', 'member_id', 'work_date', 'check_in', 'check_out', 'in_lat', 'in_lng', 'in_accuracy_m', 'in_distance_m',
-    'out_lat', 'out_lng', 'out_accuracy_m', 'out_distance_m', 'source', 'edit_reason'],
+    'out_lat', 'out_lng', 'out_accuracy_m', 'out_distance_m', 'source', 'edit_reason', 'break_minutes', 'wfh'],
   leave_requests: ['id', 'member_id', 'start_date', 'end_date', 'leave_type', 'half_day', 'days', 'reason', 'status', 'admin_note', 'decided_by', 'decided_at', 'created_at'],
   correction_requests: ['id', 'member_id', 'work_date', 'requested_check_in', 'requested_check_out', 'reason', 'status', 'admin_note', 'decided_by', 'decided_at', 'created_at'],
   punch_attempts: ['id', 'member_id', 'attempted_at', 'kind', 'lat', 'lng', 'accuracy_m', 'distance_m', 'reason'],
@@ -35,8 +35,8 @@ var TABLES = {
   notifications: ['id', 'audience', 'kind', 'title', 'body', 'link', 'created_at'],
 };
 var NUMERIC = { days: 1, in_lat: 1, in_lng: 1, in_accuracy_m: 1, in_distance_m: 1, out_lat: 1, out_lng: 1, out_accuracy_m: 1, out_distance_m: 1,
-  lat: 1, lng: 1, accuracy_m: 1, distance_m: 1, id_num: 1, required_minutes: 1 };
-var BOOL = { half_day: 1 };
+  lat: 1, lng: 1, accuracy_m: 1, distance_m: 1, id_num: 1, required_minutes: 1, break_minutes: 1 };
+var BOOL = { half_day: 1, wfh: 1 };
 var AUDITED = { members: 1, holidays: 1, attendance: 1, leave_requests: 1, correction_requests: 1, org_settings: 1 };
 var SECRET = ['pw_hash', 'pw_salt', 'invite_hash', 'invite_expires'];
 var TAB_TITLES = { members: 'People', holidays: 'Holidays', attendance: 'Attendance', leave_requests: 'Leave', correction_requests: 'Fixes',
@@ -47,7 +47,7 @@ var DEFAULT_SETTINGS = {
   annual_leave_days: 24, shift_start: '09:30:00', late_grace_minutes: 15, geofence_enabled: false, office_lat: null, office_lng: null,
   geofence_radius_m: 150, max_gps_accuracy_m: 100,
   // optional rules (off / empty by default)
-  office_end: '18:30:00', earliest_checkin: null, late_marks_per_half_day: 0,
+  office_end: '18:30:00', earliest_checkin: null, late_marks_per_half_day: 0, allow_wfh: false,
   // reminders
   reminder_hour: 18, notify_admin_email: true, whatsapp_group_link: '', admin_whatsapp_phone: '', callmebot_apikey: '',
 };
@@ -267,7 +267,11 @@ function selfOrAdmin(me, id) { if (id && id !== me.id && me.role !== 'admin') fa
 function strip(rows) { return rows.map(function (r) { var c = {}; for (var k in r) if (k !== '_row' && SECRET.indexOf(k) < 0) c[k] = r[k]; return c; }); }
 
 var H = {};
-H.ping = function () { return { version: VERSION, time: iso(now()) }; };
+H.ping = function () {
+  // Public: only the version and the organisation's display name (shown on the sign-in screen so people know which office they are joining).
+  var name = null; try { name = new Db(spreadsheet()).settings().company_name; } catch (e) { /* not set up yet */ }
+  return { version: VERSION, time: iso(now()), org: name };
+};
 
 H.sign_in = function (db, _, a) {
   var email = cleanEmail(a.email); throttle('login:' + email);
@@ -328,24 +332,46 @@ function checkLocation(db, me, kind, lat, lng, acc) {
   if (why) db.insert('punch_attempts', { id: uuid(), member_id: me.id, attempted_at: iso(now()), kind: kind, lat: null, lng: null, accuracy_m: okNum(acc) ? Math.round(acc) : null, distance_m: d === null ? null : Math.round(d), reason: why });
   return { distance: d, refusal: why };
 }
+function openSession(db, memberId) {
+  // The latest record still without a check-out, started in the last 20 h (night shifts cross midnight).
+  var t = now().getTime();
+  return db.all('attendance').filter(function (r) { return r.member_id === memberId && !r.check_out && new Date(r.check_in).getTime() > t - 20 * 3600e3; })
+    .sort(function (x, y) { return x.check_in < y.check_in ? 1 : -1; })[0] || null;
+}
+// The shift shown on the Today screen: open, or (night shift) started yesterday and closed in the last 4 h.
+function currentShift(db, memberId, today) {
+  var t = now().getTime();
+  return db.all('attendance').filter(function (r) {
+    return r.member_id === memberId && new Date(r.check_in).getTime() > t - 20 * 3600e3 &&
+      (!r.check_out || (r.work_date !== today && new Date(r.check_out).getTime() > t - 4 * 3600e3));
+  }).sort(function (x, y) { return x.check_in < y.check_in ? 1 : -1; })[0] || null;
+}
 H.punch_in = function (db, me, a) {
-  var today = db.today();
-  if (db.all('attendance').some(function (r) { return r.member_id === me.id && r.work_date === today; })) fail('ALREADY_PUNCHED_IN', 'you already checked in today');
-  var sc = sched(db, me), s = db.settings();
-  if (s.earliest_checkin && localHM(iso(now()), s.timezone) < hm(s.earliest_checkin)) fail('TOO_EARLY', 'check-in opens at ' + hm(s.earliest_checkin));
+  var today = db.today(), s = db.settings(), sc = sched(db, me), wfh = !!a.p_wfh;
+  var open = openSession(db, me.id);
+  if (open) fail('ALREADY_PUNCHED_IN', 'you are already checked in since ' + localHM(open.check_in, s.timezone));
+  var rec = db.all('attendance').filter(function (r) { return r.member_id === me.id && r.work_date === today; })[0];
+  // A break after midnight on a night shift resumes the shift that started yesterday.
+  if (!rec && a.p_resume) rec = currentShift(db, me.id, today);
+  if (rec && !a.p_resume) fail('ALREADY_PUNCHED_IN', 'you already checked in today');
+  if (!rec && s.earliest_checkin && localHM(iso(now()), s.timezone) < hm(s.earliest_checkin)) fail('TOO_EARLY', 'check-in opens at ' + hm(s.earliest_checkin));
   if (db.isWorkingDay(today, sc.weekend_mode) && db.all('leave_requests').some(function (l) { return l.member_id === me.id && l.status === 'approved' && !l.half_day && today >= l.start_date && today <= l.end_date; }))
     fail('ON_LEAVE', 'you are on approved leave today');
-  var loc = checkLocation(db, me, 'in', a.p_lat, a.p_lng, a.p_accuracy);
-  if (loc.refusal) return { ok: false, error: loc.refusal };
-  var r = db.insert('attendance', { id: uuid(), member_id: me.id, work_date: today, check_in: iso(now()), check_out: null, in_lat: null, in_lng: null, in_accuracy_m: rnd(a.p_accuracy), in_distance_m: rnd(loc.distance), source: 'app' });
+  if (wfh && !s.allow_wfh) fail('NOT_ALLOWED', 'work from home is not turned on for your office');
+  var loc = wfh ? { distance: null } : checkLocation(db, me, 'in', a.p_lat, a.p_lng, a.p_accuracy);
+  if (loc.refusal) return { ok: false, error: loc.refusal, wfh_allowed: !!s.allow_wfh };
+  if (rec) {
+    // Back after a break (or a check-out by mistake): the time away is not counted as work.
+    var away = Math.max(0, minsBetween(rec.check_out, iso(now())));
+    return { ok: true, attendance: db.update('attendance', rec, { check_out: null, break_minutes: (rec.break_minutes || 0) + away, wfh: rec.wfh || wfh }) };
+  }
+  var r = db.insert('attendance', { id: uuid(), member_id: me.id, work_date: today, check_in: iso(now()), check_out: null, in_lat: null, in_lng: null, in_accuracy_m: rnd(a.p_accuracy), in_distance_m: rnd(loc.distance), source: 'app', wfh: wfh });
   return { ok: true, attendance: r };
 };
 H.punch_out = function (db, me, a) {
-  var t = now().getTime();
-  var open = db.all('attendance').filter(function (r) { return r.member_id === me.id && !r.check_out && new Date(r.check_in).getTime() > t - 20 * 3600e3; })
-    .sort(function (x, y) { return x.check_in < y.check_in ? 1 : -1; })[0];
+  var open = openSession(db, me.id);
   if (!open) fail('NOT_PUNCHED_IN', 'check in first');
-  var loc = checkLocation(db, me, 'out', a.p_lat, a.p_lng, a.p_accuracy);
+  var loc = open.wfh ? { distance: null } : checkLocation(db, me, 'out', a.p_lat, a.p_lng, a.p_accuracy);
   if (loc.refusal) return { ok: false, error: loc.refusal };
   var r = db.update('attendance', open, { check_out: iso(now()), out_lat: null, out_lng: null, out_accuracy_m: rnd(a.p_accuracy), out_distance_m: rnd(loc.distance) });
   return { ok: true, attendance: r };
@@ -394,7 +420,7 @@ H.request_correction = function (db, me, a) {
   if (reason.length < 3 || reason.length > 500) fail('BAD_REASON', 'give a short reason');
   if (d > today) fail('BAD_DATES', 'cannot correct a future date');
   if (d < addDays(today, -60)) fail('BAD_DATES', 'corrections are allowed for the last 60 days');
-  if (i && o && hm(o) <= hm(i)) fail('BAD_TIMES', 'check-out must be after check-in');
+  if (i && o && hm(o) === hm(i)) fail('BAD_TIMES', 'check-out must be after check-in');
   if (db.all('correction_requests').some(function (c) { return c.member_id === me.id && c.work_date === d && c.status === 'pending'; })) fail('DUPLICATE', 'you already have a pending request for this date');
   return db.insert('correction_requests', { id: uuid(), member_id: me.id, work_date: d, requested_check_in: i ? hm(i) + ':00' : null, requested_check_out: o ? hm(o) + ':00' : null, reason: reason, status: 'pending', created_at: iso(now()) });
 };
@@ -420,17 +446,21 @@ function memberDays(db, memberId, from, to) {
   db.all('attendance').forEach(function (r) { if (r.member_id === memberId) att[r.work_date] = r; });
   db.all('leave_requests').forEach(function (l) { if (l.member_id === memberId && l.status === 'approved') lv.push(l); });
   var shiftLimit = hm(sc.shift_start).split(':'), lateAfter = Number(shiftLimit[0]) * 60 + Number(shiftLimit[1]) + s.late_grace_minutes;
-  var end = to < today ? to : today;
+  var end = to < today ? to : today, mem = db.find('members', memberId);
+  // Days before the person was added are not "absent" — they simply didn't work here yet.
+  var joined = mem && mem.created_at ? localDate(new Date(mem.created_at), tz) : from;
   for (var d = from; d <= end; d = addDays(d, 1)) {
+    if (d < joined && !att[d]) continue;
     var a = att[d] || null, ci = a ? a.check_in : null, co = a ? a.check_out : null;
-    var mins = ci && co ? minsBetween(ci, co) : null, hol = db.holidayOn(d), wk = db.isWeekend(d, sc.weekend_mode), l = null;
+    var mins = ci && co ? Math.max(0, minsBetween(ci, co) - (a.break_minutes || 0)) : null, hol = db.holidayOn(d), wk = db.isWeekend(d, sc.weekend_mode), l = null;
     if (db.isWorkingDay(d, sc.weekend_mode)) for (var i = 0; i < lv.length; i++) if (d >= lv[i].start_date && d <= lv[i].end_date) { l = lv[i].half_day ? 0.5 : 1; break; }
-    var kind = ci && !co && d < today ? 'missing_checkout' : ci && !co ? 'working' : ci && l === 0.5 ? 'half_day_leave'
+    var stillOpen = ci && !co && (d === today || now().getTime() - new Date(ci).getTime() < 20 * 3600e3);
+    var kind = stillOpen ? 'working' : ci && !co ? 'missing_checkout' : ci && l === 0.5 ? 'half_day_leave'
       : ci && mins >= sc.required ? 'full' : ci && mins >= sc.half ? 'short' : ci ? 'half_day'
       : l === 1 ? 'leave' : hol ? 'holiday' : wk ? 'weekend' : l === 0.5 ? 'half_day_leave' : d === today ? 'not_yet' : 'absent';
     var late = false;
     if (ci) { var t = localHM(ci, tz).split(':'); late = Number(t[0]) * 60 + Number(t[1]) > lateAfter; }
-    out.push({ day: d, kind: kind, check_in: ci, check_out: co, worked_minutes: mins, late: late,
+    out.push({ day: d, kind: kind, check_in: ci, check_out: co, worked_minutes: mins, late: late, break_minutes: a ? a.break_minutes || 0 : 0, wfh: !!(a && a.wfh),
       fulfilled: mins !== null && mins >= (l === 0.5 ? sc.half : sc.required), leave_days: l || 0, holiday: hol });
   }
   return out;
@@ -464,7 +494,7 @@ H.member_summary = function (db, me, a) {
 H.team_day = function (db, me, a) {
   requireAdmin(me); var d = a.p_day ? needDate(a.p_day) : db.today();
   return db.all('members').filter(function (m) { return m.status === 'active'; }).sort(function (x, y) { return x.nickname.localeCompare(y.nickname); })
-    .map(function (m) { var x = memberDays(db, m.id, d, d)[0] || {}; return { member_id: m.id, nickname: m.nickname, email: m.email, kind: x.kind, check_in: x.check_in || null, check_out: x.check_out || null, worked_minutes: x.worked_minutes === undefined ? null : x.worked_minutes, late: !!x.late }; });
+    .map(function (m) { var x = memberDays(db, m.id, d, d)[0] || {}; return { member_id: m.id, nickname: m.nickname, email: m.email, kind: x.kind, check_in: x.check_in || null, check_out: x.check_out || null, worked_minutes: x.worked_minutes === undefined ? null : x.worked_minutes, late: !!x.late, wfh: !!x.wfh, break_minutes: x.break_minutes || 0 }; });
 };
 H.team_trend = function (db, me, a) {
   requireAdmin(me); var r = range(a), by = {};
@@ -529,9 +559,12 @@ function setAttendance(db, memberId, date, i, o, reason, source) {
   var r = db.all('attendance').filter(function (x) { return x.member_id === memberId && x.work_date === date; })[0];
   var ci = i ? localTs(date, i, tz) : r ? r.check_in : null, co = o ? localTs(date, o, tz) : r ? r.check_out : null;
   if (!ci) fail('BAD_TIMES', 'a check-in time is required');
+  // Night shift: a check-out time earlier than the check-in time means the next morning.
+  if (o && co <= ci) co = localTs(addDays(date, 1), o, tz);
+  if (co && minsBetween(ci, co) > 20 * 60) fail('BAD_TIMES', 'a shift cannot be longer than 20 hours');
   if (co && co <= ci) fail('BAD_TIMES', 'check-out must be after check-in');
   if (co && new Date(co) > now()) fail('BAD_TIMES', 'check-out cannot be in the future');
-  if (r) return db.update('attendance', r, { check_in: ci, check_out: co, source: source, edit_reason: reason });
+  if (r) return db.update('attendance', r, { check_in: ci, check_out: co, source: source, edit_reason: reason, break_minutes: i && o ? null : r.break_minutes });
   return db.insert('attendance', { id: uuid(), member_id: memberId, work_date: date, check_in: ci, check_out: co, source: source, edit_reason: reason });
 }
 H.admin_set_attendance = function (db, me, a) { requireAdmin(me); return setAttendance(db, a.p_member, a.p_date, a.p_in, a.p_out, a.p_reason, 'admin'); };
@@ -582,6 +615,7 @@ H.save_settings = function (db, me, a) {
   if ('office_end' in p) { if (!isTime(p.office_end)) fail('BAD_SETTING', 'office end must look like 18:30'); next.office_end = hm(p.office_end) + ':00'; }
   if ('earliest_checkin' in p) { if (p.earliest_checkin && !isTime(p.earliest_checkin)) fail('BAD_SETTING', 'earliest check-in must look like 08:00'); next.earliest_checkin = p.earliest_checkin ? hm(p.earliest_checkin) + ':00' : null; }
   if ('notify_admin_email' in p) next.notify_admin_email = !!p.notify_admin_email;
+  if ('allow_wfh' in p) next.allow_wfh = !!p.allow_wfh;
   if ('whatsapp_group_link' in p) {
     var g = trim(p.whatsapp_group_link);
     if (g && !/^https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]{10,40}$/.test(g)) fail('BAD_SETTING', 'paste the group invite link — it starts with https://chat.whatsapp.com/');
@@ -648,7 +682,7 @@ H.bootstrap = function (db, me, a) {
   var up = db.all('holidays').filter(function (h) { return h.holiday_date >= today; }).sort(function (x, y) { return x.holiday_date < y.holiday_date ? -1 : 1; }).slice(0, 3);
   var out = { me: strip([me])[0], settings: publicSettings(db, me), schedule: sc, server_time: iso(now()), today: today,
     week: memberDays(db, me.id, ws, addDays(ws, 6)), month: summarize(db, memberDays(db, me.id, m0, today), sc.weekend_mode),
-    balance: leaveBalance(db, me.id, Number(today.slice(0, 4))), notifications: notificationsFor(db, me, 30), upcoming_holidays: strip(up) };
+    balance: leaveBalance(db, me.id, Number(today.slice(0, 4))), notifications: notificationsFor(db, me, 30), upcoming_holidays: strip(up), open: (function () { var o = currentShift(db, me.id, today); return o ? strip([o])[0] : null; })() };
   if (me.role === 'admin') {
     out.pending = db.all('leave_requests').filter(function (l) { return l.status === 'pending'; }).length + db.all('correction_requests').filter(function (c) { return c.status === 'pending'; }).length;
     out.setup = { people: db.all('members').filter(function (x) { return x.status === 'active'; }).length, holidays: db.all('holidays').filter(function (h) { return h.holiday_date >= today; }).length,

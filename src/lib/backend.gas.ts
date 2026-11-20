@@ -2,16 +2,21 @@
 // the script checks the session token and applies all rules on Google's server.
 import type { Backend, Boot } from './types';
 
-let url = '';
-const KEY = 'punchin.token';
+let url = '', org = '';
+// Each organisation has its own Google Sheet server. The default one comes from config.json; another office's
+// app link carries ?org=<deployment id>. Sign-in tokens are kept per organisation so one office's token is
+// never sent to another office's server.
+const keyFor = () => (org ? 'punchin.token.' + org : 'punchin.token');
 const listeners = new Set<(b: boolean) => void>();
-export const getToken = () => { try { return localStorage.getItem(KEY); } catch { return null; } };
+export const getToken = () => { try { return localStorage.getItem(keyFor()); } catch { return null; } };
 const setToken = (t: string | null) => {
-  try { t ? localStorage.setItem(KEY, t) : localStorage.removeItem(KEY); } catch { /* private mode */ }
+  try { t ? localStorage.setItem(keyFor(), t) : localStorage.removeItem(keyFor()); } catch { /* private mode */ }
   listeners.forEach(cb => cb(!!t));
 };
 
-export function initGas(scriptUrl: string) { url = scriptUrl; gasBackend.configured = true; }
+export const ORG_ID = /^AKfyc[\w-]{20,140}$/;
+export function initGas(scriptUrl: string, orgId = '') { url = scriptUrl; org = orgId; gasBackend.configured = true; }
+const appBase = () => location.href.split('#')[0].split('?')[0] + (org ? '?org=' + org : '');
 
 function human(raw: string): Error {
   const m = raw.match(/^([A-Z_]+):\s*(.*)$/s);
@@ -50,11 +55,13 @@ export const gasBackend: Backend = {
   async signIn(email, password) { setToken((await call<{ token: string }>('sign_in', { email, password })).token); },
   async signUp(email, password, code) { setToken((await call<{ token: string }>('sign_up', { email, password, code })).token); },
   async signOut() { try { await call('sign_out'); } catch { /* already gone */ } setToken(null); },
-  bootstrap: () => call<Boot | null>('bootstrap', { app_url: location.href.split('#')[0] }),
+  bootstrap: () => call<Boot | null>('bootstrap', { app_url: appBase() }),
+  orgName: async () => (await call<{ org: string | null }>('ping')).org ?? null,
+  inviteLink: (e, c) => `${appBase()}#/join?e=${encodeURIComponent(e)}&c=${c}`,
   serverTime: () => call<string>('server_time'),
   notifications: () => call('notifications'),
 
-  punch: (kind, fix) => call(kind === 'in' ? 'punch_in' : 'punch_out', { p_lat: fix?.lat ?? null, p_lng: fix?.lng ?? null, p_accuracy: fix?.accuracy ?? null }),
+  punch: (kind, fix, o) => call(kind === 'in' ? 'punch_in' : 'punch_out', { p_lat: fix?.lat ?? null, p_lng: fix?.lng ?? null, p_accuracy: fix?.accuracy ?? null, p_wfh: !!o?.wfh, p_resume: !!o?.resume }),
   days: (member, from, to) => call('member_days', { p_member: member, p_from: from, p_to: to }),
   summary: async (member, from, to) => one(await call('member_summary', { p_member: member, p_from: from, p_to: to })),
   balance: async (member, year) => one(await call('leave_balance', { p_member: member ?? null, p_year: year ?? null })),

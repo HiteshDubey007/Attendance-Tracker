@@ -4,7 +4,7 @@ import { backend } from '@backend';
 import type { Boot } from './lib/types';
 import { Icon, ToastProvider } from './ui';
 import { Bell, InstallSteps, Tour, markSeen, seen, tourKey, type TourStep } from './extras';
-import { TodayPage, HistoryPage, LeavePage, FixesPage, MePage, PrivacyPage, AnnouncePage } from './pages/employee';
+import { TodayPage, HistoryPage, LeavePage, MePage, PrivacyPage, AnnouncePage } from './pages/employee';
 import { OverviewPage, PeoplePage, RecordsPage, ApprovalsPage, HolidaysPage, SettingsPage, SecurityPage, MorePage } from './pages/admin';
 
 interface AppCtx extends Boot { reload: () => void; startTour: () => void }
@@ -28,6 +28,12 @@ export default function App() {
       </HashRouter>
     </ToastProvider>
   );
+}
+
+function OrgName() {
+  const [n, setN] = useState<string | null>(null);
+  useEffect(() => { backend.orgName().then(setN).catch(() => {}); }, []);
+  return n ? <div className="org-chip"><Icon n="people" />{n}</div> : null;
 }
 
 function Splash() { return <div className="center-screen"><div className="spinner" aria-label="Loading" /></div>; }
@@ -66,6 +72,7 @@ function AuthScreen({ initial }: { initial?: { email: string; code: string } }) 
       <AuthArt />
       <div className="auth-form">
         <form onSubmit={submit}>
+          <OrgName />
           <h1>{mode === 'in' ? 'Sign in' : 'Set your password'}</h1>
           <p className="muted" style={{ marginBottom: 22 }}>{mode === 'up' ? 'Use your office email and the 8-letter code your admin sent you. Works for first sign-in and for a forgotten password.' : 'Use your office email.'}</p>
           <label className="field"><span>Office email</span><input className="input" type="email" autoComplete="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="you@company.com" /></label>
@@ -106,11 +113,11 @@ function JoinPage({ signedIn }: { signedIn: boolean }) {
 
 const EMP_TOUR: TourStep[] = [
   { target: 'punch', title: 'Check in and out here', body: 'Tap once when you arrive and once when you leave. The ring fills up as your hours add up — it turns green when you hit your daily target.' },
-  { target: 'map', title: 'Your office area', body: 'Check-in only works inside this orange circle. Tap “Am I inside?” any time to see where you are.' },
+  { target: 'map', title: 'Your office area', body: 'Check-in only works near the office. Tap “Am I inside?” any time to see where you are on the map.' },
   { target: 'week', title: 'Your week at a glance', body: 'Each bar shows the hours you worked that day.' },
-  { target: 'month', title: 'This month', body: 'How many days you met the target, late arrivals and leave left.' },
+  { target: 'month', title: 'This month', body: 'How many days you met your daily target, and how many times you were late.' },
   { target: 'nav-leave', title: 'Apply for leave', body: 'Pick dates — weekends and office holidays are never counted against you.' },
-  { target: 'nav-fixes', title: 'Forgot to check out?', body: 'Ask for a fix here and your admin will correct it.' },
+  { target: 'nav-history', title: 'Forgot to check out?', body: 'Open History and tap “Fix” on that day — your admin approves it.' },
   { target: 'bell', title: 'Notifications', body: 'Holiday notices and reminders show up here.' },
 ];
 const ADMIN_TOUR: TourStep[] = [
@@ -151,7 +158,7 @@ function Session() {
             <Route path="/today" element={<TodayPage />} />
             <Route path="/history" element={<HistoryPage />} />
             <Route path="/leave" element={<LeavePage />} />
-            <Route path="/fixes" element={<FixesPage />} />
+            <Route path="/fixes" element={<HistoryPage />} />
             <Route path="/me" element={<MePage />} />
             {admin && <>
               <Route path="/admin" element={<OverviewPage />} />
@@ -186,7 +193,7 @@ function NotMember() {
   </div></div>;
 }
 
-const EMP_NAV = [['/today', 'today', 'Today'], ['/history', 'history', 'History'], ['/leave', 'leave', 'Leave'], ['/fixes', 'fix', 'Fixes'], ['/me', 'me', 'Me']] as const;
+const EMP_NAV = [['/today', 'today', 'Today'], ['/history', 'history', 'History'], ['/leave', 'leave', 'Leave'], ['/me', 'me', 'Me']] as const;
 const ADMIN_NAV = [['/admin', 'overview', 'Overview'], ['/admin/approvals', 'approvals', 'Approvals'], ['/admin/people', 'people', 'People'], ['/admin/records', 'records', 'Records'],
   ['/admin/holidays', 'holidays', 'Holidays'], ['/admin/settings', 'settings', 'Settings'], ['/admin/security', 'shield', 'Security']] as const;
 const tourId = (to: string) => 'nav-' + (to.split('/').pop() || 'today');
@@ -197,7 +204,7 @@ function Side({ admin }: { admin: boolean }) {
     <nav className="side" aria-label="Main">
       <div className="brand"><img src="./icon.svg" alt="" /><div><b>Punch<span>In</span></b><small>{settings.company_name}</small></div></div>
       {admin && <div className="navsec">My day</div>}
-      {EMP_NAV.slice(0, 4).map(([to, i, l]) => <NavLink key={to} to={to} end className="navlink" data-tour={tourId(to)}><Icon n={i} />{l}</NavLink>)}
+      {EMP_NAV.slice(0, 3).map(([to, i, l]) => <NavLink key={to} to={to} end className="navlink" data-tour={tourId(to)}><Icon n={i} />{l}</NavLink>)}
       {admin && <><div className="navsec">Team</div>
         {ADMIN_NAV.map(([to, i, l]) => <NavLink key={to} to={to} end className="navlink" data-tour={tourId(to)}><Icon n={i} />{l}{to === '/admin/approvals' && (pending ?? 0) > 0 && <span className="count">{pending}</span>}</NavLink>)}</>}
       <div className="grow" />

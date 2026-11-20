@@ -93,7 +93,7 @@ export function OverviewPage() {
         <div className="tablewrap"><table className="num">
           <thead><tr><th>Name</th><th>Status</th><th>In</th><th>Out</th><th>Hours</th></tr></thead>
           <tbody>{t.map(r => <tr key={r.member_id}>
-            <td><b>{r.nickname}</b> {r.late && <span className="tag">Late</span>}</td><td><Pill kind={r.kind} /></td>
+            <td><b>{r.nickname}</b> {r.late && <span className="tag">Late</span>} {r.wfh && <span className="tag">WFH</span>}</td><td><Pill kind={r.kind} /></td>
             <td>{timeInTz(r.check_in, tz)}</td><td>{timeInTz(r.check_out, tz)}</td><td>{r.worked_minutes != null ? fmtDuration(r.worked_minutes) : '—'}</td>
           </tr>)}</tbody>
         </table></div>
@@ -103,13 +103,13 @@ export function OverviewPage() {
       <section className="card">
         <h2>By person <small>{fmtDate(from)} – {fmtDate(to)}</small></h2>
         <div className="tablewrap"><table className="num">
-          <thead><tr><th>Name</th><th>Target met</th><th style={{ minWidth: 120 }}></th><th>Present</th><th>Late</th><th>Leave</th><th>Absent</th><th>Hours</th></tr></thead>
+          <thead><tr><th>Name</th><th>Target met</th><th className="hide-m" style={{ minWidth: 120 }}></th><th>Present</th><th>Late</th><th className="hide-m">Leave</th><th className="hide-m">Absent</th><th className="hide-m">Hours</th></tr></thead>
           <tbody>{(sums.data ?? []).map(({ m, s }) => {
             const p = pct(s.fulfilled_days, s.fulfilled_days + s.unfulfilled_days);
             return <tr key={m.id}>
               <td><Link to={`/admin/records?m=${m.id}`} style={{ color: 'inherit', fontWeight: 700 }}>{m.nickname}</Link></td>
-              <td><b>{p}%</b></td><td><div className="progress"><i style={{ width: `${p}%` }} /></div></td>
-              <td>{s.present_days}/{s.working_days}</td><td>{s.late_days}</td><td>{s.leave_days}</td><td>{s.absent_days}</td><td>{Math.round(s.total_minutes / 60)}</td>
+              <td><b>{p}%</b></td><td className="hide-m"><div className="progress"><i style={{ width: `${p}%` }} /></div></td>
+              <td>{s.present_days}/{s.working_days}</td><td>{s.late_days}</td><td className="hide-m">{s.leave_days}</td><td className="hide-m">{s.absent_days}</td><td className="hide-m">{Math.round(s.total_minutes / 60)}</td>
             </tr>;
           })}</tbody>
         </table></div>
@@ -156,7 +156,7 @@ export function PeoplePage() {
 
 function CodeCard({ who, email, code, onClose }: { who: string; email: string; code: string; onClose: () => void }) {
   const toast = useToast();
-  const link = `${location.href.split('#')[0]}#/join?e=${encodeURIComponent(email)}&c=${code}`;
+  const link = backend.inviteLink(email, code);
   const text = `Hi ${who}! 👋 You’re invited to PunchIn, our office attendance app.\n\n1️⃣ Tap: ${link}\n2️⃣ Choose a password\n3️⃣ Add the app to your home screen\n\nYour one-time code is ${code} (valid 14 days).`;
   return (
     <Modal title={`Code for ${who}`} lede="Share it privately (WhatsApp, in person). It works once and expires in 14 days." onClose={onClose}>
@@ -293,7 +293,7 @@ export function RecordsPage() {
             const a = byDate.get(d.day);
             return <tr key={d.day}>
               <td><b>{fmtDate(d.day, { weekday: 'short', day: 'numeric', month: 'short' })}</b></td>
-              <td><Pill kind={d.kind} /> {d.late && <span className="tag">Late</span>}</td>
+              <td><Pill kind={d.kind} /> {d.late && <span className="tag">Late</span>} {d.wfh && <span className="tag">WFH</span>}</td>
               <td>{timeInTz(d.check_in, tz)}</td><td>{timeInTz(d.check_out, tz)}</td>
               <td>{d.worked_minutes != null ? fmtDuration(d.worked_minutes) : '—'}</td>
               <td className="small muted" style={{ whiteSpace: 'normal', minWidth: 140 }}>
@@ -484,9 +484,9 @@ export function SettingsPage() {
   const save = async () => {
     if (s.geofence_enabled && (s.office_lat == null || s.office_lng == null)) throw new Error('Mark the office on the map before turning the check on.');
     const { company_name, timezone, required_minutes, half_day_minutes, weekend_mode, annual_leave_days, shift_start, late_grace_minutes, geofence_enabled, office_lat, office_lng,
-      geofence_radius_m, max_gps_accuracy_m, office_end, earliest_checkin, late_marks_per_half_day, reminder_hour, notify_admin_email, whatsapp_group_link, admin_whatsapp_phone, callmebot_apikey } = s;
+      geofence_radius_m, max_gps_accuracy_m, office_end, earliest_checkin, late_marks_per_half_day, allow_wfh, reminder_hour, notify_admin_email, whatsapp_group_link, admin_whatsapp_phone, callmebot_apikey } = s;
     await backend.saveSettings({ company_name, timezone, required_minutes, half_day_minutes, weekend_mode, annual_leave_days, shift_start, late_grace_minutes, geofence_enabled, office_lat, office_lng,
-      geofence_radius_m, max_gps_accuracy_m, office_end, earliest_checkin, late_marks_per_half_day, reminder_hour, notify_admin_email, whatsapp_group_link, admin_whatsapp_phone, callmebot_apikey });
+      geofence_radius_m, max_gps_accuracy_m, office_end, earliest_checkin, late_marks_per_half_day, allow_wfh, reminder_hour, notify_admin_email, whatsapp_group_link, admin_whatsapp_phone, callmebot_apikey });
     reload(); toast('Settings saved');
   };
   return <>
@@ -521,6 +521,7 @@ export function SettingsPage() {
         <label className="check"><input type="checkbox" checked={!!s.earliest_checkin} onChange={e => up('earliest_checkin', e.target.checked ? '08:00:00' : null)} />Don’t allow check-in before a set time <Tip>Stops people checking in very early to pad hours.</Tip></label>
         {s.earliest_checkin && <label className="field" style={{ maxWidth: 240 }}><span>Check-in opens at</span><input className="input" type="time" value={s.earliest_checkin.slice(0, 5)} onChange={e => up('earliest_checkin', e.target.value)} /></label>}
         <label className="check"><input type="checkbox" checked={s.late_marks_per_half_day > 0} onChange={e => up('late_marks_per_half_day', e.target.checked ? 3 : 0)} />Count late arrivals as half days <Tip>Common in India: e.g. every 3 late marks = ½ day. Shown in reports only; it never changes leave balances automatically.</Tip></label>
+        <label className="check"><input type="checkbox" checked={!!s.allow_wfh} onChange={e => up('allow_wfh', e.target.checked)} />Allow work-from-home check-ins <Tip>People outside the office circle can check in as “working from home”. It’s marked WFH in every report.</Tip></label>
         {s.late_marks_per_half_day > 0 && <label className="field" style={{ maxWidth: 240 }}><span>Late marks per half day</span><input className="input" type="number" min={1} max={31} value={s.late_marks_per_half_day} onChange={e => up('late_marks_per_half_day', Number(e.target.value))} /></label>}
       </section>
 

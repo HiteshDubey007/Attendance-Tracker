@@ -13,7 +13,7 @@ export const C = { orange: '#F26B1D', orangeSoft: '#FBC9A8', ink: '#1C1712', lin
 const P: Record<string, string> = {
   today: 'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
   history: 'M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z',
-  leave: 'M17 8c0 5-5 13-5 13S7 13 7 8a5 5 0 0 1 10 0ZM12 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z',
+  leave: 'M22 12a10 10 0 0 0-20 0ZM12 12v7a2 2 0 0 0 4 0',
   fix: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4 2.5-2.5Z',
   me: 'M20 21a8 8 0 0 0-16 0M12 13a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z',
   overview: 'M3 3v18h18M7 15l4-4 3 3 5-6',

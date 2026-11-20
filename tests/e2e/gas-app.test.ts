@@ -193,6 +193,80 @@ describe('4. Attacks through the URL and inputs', () => {
   });
 });
 
+describe('6. v2.1: breaks, simpler History, work from home, a second organisation', () => {
+  let p6: Page, c6: BrowserContext;
+  beforeAll(async () => ({ ctx: c6, page: p6 } = await newPhone({ geo: north(40), allowGeo: true })));
+  afterAll(async () => { await c6?.close(); });
+  it('sign-in screen names the office you are signing in to', async () => {
+    const admin = g.call('sign_in', { email: 'manager@dot9games.com', password: 'manager-pass-1' }).token;
+    g.call('save_settings', { settings: { company_name: 'Dot9 Games' } }, admin);
+    await p6.goto(APP);
+    await p6.locator('.org-chip', { hasText: 'Dot9 Games' }).waitFor({ timeout: 10000 });
+    await p6.getByLabel('Office email').fill('hiteshdubey@dot9games.com'); await p6.getByLabel('Password').fill('hitesh-pass-1');
+    await p6.getByRole('button', { name: 'Sign in' }).click();
+    await p6.getByRole('button', { name: /Check out/ }).waitFor({ timeout: 10000 });
+    await p6.getByRole('button', { name: 'Skip tour' }).click({ timeout: 5000 });
+  });
+  it('a new joiner is not shown as absent for days before they joined', async () => {
+    await p6.locator('.bottomnav a', { hasText: 'History' }).click();
+    await p6.getByText('Show weekends & holidays').waitFor();
+    await p6.waitForTimeout(800);
+    expect(await p6.locator('.list .item').count()).toBe(1);        // only 19 Nov, the joining day
+    await p6.locator('.bottomnav a', { hasText: 'Today' }).click();
+  });
+  it('bottom bar is Today · History · Leave · Me (fixes live inside History)', async () => {
+    expect(await p6.locator('.bottomnav a').allTextContents()).toEqual(['Today', 'History', 'Leave', 'Me']);
+  });
+  it('check out for lunch, check in again: the break is not counted', async () => {
+    g.setNowLocal('2026-11-19 13:00');
+    await p6.getByRole('button', { name: /Check out/ }).click();
+    await p6.getByRole('button', { name: /Back after a break/ }).waitFor({ timeout: 10000 });
+    g.setNowLocal('2026-11-19 13:45');
+    await p6.getByRole('button', { name: /Back after a break/ }).click();
+    await p6.getByRole('button', { name: /Check out/ }).waitFor({ timeout: 10000 });
+    expect(await p6.locator('.dial-card').textContent()).toMatch(/45m break not counted/);
+  });
+  it('History has a Fix button on wrong days and a form for any day', async () => {
+    await p6.locator('.bottomnav a', { hasText: 'History' }).click();
+    await p6.getByRole('button', { name: /Ask for a fix/ }).click();
+    await p6.getByRole('dialog', { name: /Ask for a fix/ }).waitFor({ timeout: 5000 });
+    await p6.getByRole('button', { name: 'Cancel' }).click();
+    await p6.goto(APP + '#/fixes?date=2026-11-18');                 // old links from reminders still work
+    expect(await p6.getByLabel('Date').inputValue({ timeout: 5000 })).toBe('2026-11-18');
+  });
+  it('outside the office with WFH allowed: one tap to check in as working from home', async () => {
+    const admin = g.call('sign_in', { email: 'manager@dot9games.com', password: 'manager-pass-1' }).token;
+    g.call('save_settings', { settings: { allow_wfh: true } }, admin);
+    g.setNowLocal('2026-11-20 09:20');
+    await c6.setGeolocation({ ...north(5000), accuracy: 10 });
+    await p6.goto(APP + '#/today'); await p6.reload();
+    await p6.getByRole('button', { name: /^Check in/ }).click();
+    await p6.getByRole('button', { name: 'Check in as working from home' }).click();
+    await p6.getByText('Working from home today').waitFor({ timeout: 10000 });
+    expect(g.tab('Attendance').data.filter(r => r.includes('2026-11-20')).length).toBe(1);
+  });
+  it('a second organisation uses the same app with its own sheet; tokens never cross over', async () => {
+    const g2 = loadGas(); g2.setNowLocal('2026-11-20 09:00'); g2.ctx.setup();
+    const t2 = g2.call('sign_up', { email: 'owner@bakery.in', code: g2.props.get('SETUP_CODE'), password: 'bakery-pass-1' }).token;
+    g2.call('save_settings', { settings: { company_name: 'Sunrise Bakery' } }, t2);
+    const ORG = 'AKfycbSecondOrgDeploymentId123456789';
+    const sent: string[] = [];
+    await c6.route(`https://script.google.com/macros/s/${ORG}/exec`, async route => {
+      sent.push(route.request().postData() ?? '');
+      await route.fulfill({ status: 200, contentType: 'application/json', body: g2.ctx.doPost({ postData: { contents: route.request().postData() ?? '' } }).text });
+    });
+    await p6.goto(APP + `?org=${ORG}#/`);
+    await p6.locator('.org-chip', { hasText: 'Sunrise Bakery' }).waitFor({ timeout: 10000 });
+    expect(sent.every(b => JSON.parse(b).token === null)).toBe(true);     // Dot9 token was never sent to the bakery
+    await p6.getByLabel('Office email').fill('owner@bakery.in'); await p6.getByLabel('Password').fill('bakery-pass-1');
+    await p6.getByRole('button', { name: 'Sign in' }).click();
+    await p6.getByText('Team today').waitFor({ timeout: 10000 });
+    const link = await p6.evaluate(() => (window as any).__punchinInvite ?? null);
+    expect(link).toBeNull();
+    expect(await p6.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('punchin.token')).sort())).toEqual(['punchin.token', `punchin.token.${'AKfycbSecondOrgDeploymentId123456789'}`]);
+  });
+});
+
 describe('5. Privacy', () => {
   it('no camera or microphone was ever requested', async () => {
     expect(await page.evaluate(() => (window as any).__mediaCalls)).toBe(0);
@@ -212,7 +286,7 @@ describe('5. Privacy', () => {
     expect(all).not.toMatch(/19\.11[0-9]{3,}|72\.869[0-9]{2,}/);
   });
   it('privacy page is readable before signing in', async () => {
-    await page.evaluate(() => localStorage.removeItem('punchin.token'));
+    await page.evaluate(() => { localStorage.removeItem('punchin.token'); localStorage.removeItem('punchin.org'); });
     await page.goto(APP + '#/privacy');
     await page.getByText(/exact coordinates are never stored/).waitFor({ timeout: 5000 });
     await ctx.close();

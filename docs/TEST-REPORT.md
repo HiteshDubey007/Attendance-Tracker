@@ -1,4 +1,4 @@
-# PunchIn v2 — Test report
+# PunchIn v2.1 — Test report
 
 All tests run automatically on every change (GitHub → Actions). Nothing is published unless every one passes.
 
@@ -6,10 +6,11 @@ All tests run automatically on every change (GitHub → Actions). Nothing is pub
 |---|---|---|
 | Server security (Google Sheets) | Attacks the real server code directly | 31 |
 | Server v2 features | Shifts, optional rules, privacy, holiday import, reminders | 30 |
+| Several organisations (v2.1) | 3 offices side by side + 8-week night-shift back-test with breaks and WFH | 19 |
 | Back-test (Sheets + PostgreSQL) | 6 months × 18 people replayed; 108 monthly reports must match an independent calculation exactly | 20 |
 | Database security (PostgreSQL, alternative backend) | Row-level security, forged writes, audit tampering | 32 |
 | Logic | Date maths, CSV safety, app ↔ server agreement on 300 random date ranges | 7 |
-| End-to-end in Chrome | The real app + real server code; tester-style flows below | 27 |
+| End-to-end in Chrome | The real app + real server code; tester-style flows below | 34 |
 | Screens | Every screen on phone and laptop; no errors, no sideways scroll; tour; leave preview | 38 |
 
 ## 1. Basic flows
@@ -27,6 +28,17 @@ All tests run automatically on every change (GitHub → Actions). Nothing is pub
 - Public holidays: gazetted pre-ticked, observances unticked; duplicates skipped.
 - Reminders: evening before a holiday → admin in-app + email + optional WhatsApp, once only; holiday morning → everyone notified; missed check-out → only that person reminded.
 
+## 2b. Different kinds of organisation (v2.1)
+| Office | Set-up | Checked |
+|---|---|---|
+| Studio, Mumbai | Mon–Fri, 9 h, location check, no WFH | Break after lunch not counted; resume still needs the office; WFH refused |
+| Support centre | Night shift 22:00, 8 h, Sunday off, WFH allowed | Shift past midnight stays open (no double check-in, not “missing check-out”); late judged against 22:00; overnight fixes; >20 h refused |
+| Shop, Dubai | Dubai time zone, 6-day week, check-in from 09:00, 3 lates = ½ day | Opening time and late marks use Dubai time; Saturday counts |
+| All three | Separate sheets | Names shown before sign-in; a token from one office is refused by another; same email = separate accounts; audit logs verify |
+| Same app, two offices | `?org=` link | The first office's sign-in is never sent to the second office's server |
+
+Back-test: 8 weeks of random night shifts (20:40–21:30 starts, breaks across midnight, 20 % WFH) — every day's hours, WFH flag, late mark and status match an independent count.
+
 ## 3. Hacking tests
 - Employee types admin URLs (`#/admin`, `/people`, `/settings`, `/security`, `/announce`, `/more`) → sent back to their own screen.
 - Employee token calling admin functions directly → `admin only`.
@@ -39,6 +51,13 @@ All tests run automatically on every change (GitHub → Actions). Nothing is pub
 - App inside another site's frame (click-jacking) → refuses to run.
 - Employee trying to change the link used in admin emails (phishing) → ignored.
 - Editing a check-in time, deleting a row, or altering the audit log directly in the Google Sheet → **detected** by Security → Verify, naming the row.
+
+## Fixed in v2.1
+- New joiners were shown as “Absent” for every day before they joined.
+- Night shifts: after midnight the app offered a second check-in, and the shift showed as “missing check-out”.
+- Admin and fix requests could not record a check-out after midnight.
+- Leave preview used the office weekly off instead of the person's own (6-day-week staff saw the wrong count).
+- Checking out by mistake could not be undone — now “Check in again” (time away is not counted).
 
 ## 4. Location tests (150 m circle)
 | Position | Result |

@@ -9,7 +9,7 @@ const settings: Settings = {
   company_name: 'Dot Studio', timezone: 'Asia/Kolkata', required_minutes: 540, half_day_minutes: 270, weekend_mode: 'sat_sun',
   annual_leave_days: 24, shift_start: '09:30:00', late_grace_minutes: 15, geofence_enabled: true,
   office_lat: 19.1136, office_lng: 72.8697, geofence_radius_m: 150, max_gps_accuracy_m: 100,
-  office_end: '18:30:00', earliest_checkin: null, late_marks_per_half_day: 0, reminder_hour: 18, notify_admin_email: true,
+  office_end: '18:30:00', earliest_checkin: null, late_marks_per_half_day: 0, allow_wfh: true, reminder_hour: 18, notify_admin_email: true,
   whatsapp_group_link: '', admin_whatsapp_phone: '', callmebot_apikey: '',
 };
 const names = ['Hitesh', 'Aarav', 'Diya', 'Kabir', 'Meera', 'Rohan', 'Sana', 'Vikram'];
@@ -76,7 +76,9 @@ export const backend: Backend = {
     if (role === 'admin') { b.pending = 3; b.setup = { people: 7, holidays: 1, location: true, whatsapp: false }; }
     return wait(b);
   },
-  punch: async () => ({ ok: false, error: 'OUTSIDE_OFFICE: you are 1840 m from the office (limit 150 m)'.replace(/^[A-Z_]+:\s*/, '') }),
+  orgName: async () => 'Dot Studio',
+  inviteLink: (e, c) => `${location.href.split('#')[0]}#/join?e=${encodeURIComponent(e)}&c=${c}`,
+  punch: async () => ({ ok: false, wfh_allowed: true, error: 'You are 1840 m from the office (limit 150 m)' }),
   days: (m, f, t) => wait(makeDays(m, f, t)),
   async summary(m, f, t) {
     const ds = makeDays(m, f, t);

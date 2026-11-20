@@ -5,7 +5,7 @@ import { useApp, TopActions } from '../App';
 import type { Day, GeoFix, LeaveType } from '../lib/types';
 import { addDays, countWorkingDays, distanceM, fmtDate, fmtDuration, getPosition, hhmmInTz, minutesBetween, monthRange, pct, timeInTz } from '../lib/time';
 import { InstallSteps, LocationPrimer, OfficeMap, forget, locationExplained, useInstall } from '../extras';
-import { Busy, C, Donut, Empty, Icon, Modal, Pill, Seg, StatusPill, useLoad, useToast } from '../ui';
+import { Busy, C, Donut, Empty, Icon, Modal, Pill, StatusPill, useLoad, useToast } from '../ui';
 
 export function Top({ title, sub, children }: { title: string; sub?: string; children?: React.ReactNode }) {
   return <header className="top"><div><h1>{title}</h1>{sub && <p>{sub}</p>}</div><div className="row">{children}<TopActions /></div></header>;
@@ -23,7 +23,7 @@ function greeting(h: number) { return h < 12 ? 'Good morning' : h < 17 ? 'Good a
 
 // ═════════════ Today ═════════════
 export function TodayPage() {
-  const { me, settings, today, week, month: s, balance, schedule, upcoming_holidays, reload } = useApp(); const tz = settings.timezone; const toast = useToast();
+  const { me, settings, today, week, month: s, schedule, upcoming_holidays, reload, open } = useApp(); const tz = settings.timezone; const toast = useToast();
   const now = useServerNow();
   const weekStart = addDays(today, -((new Date(today + 'T12:00:00Z').getUTCDay() + 6) % 7));
   const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
@@ -31,10 +31,14 @@ export function TodayPage() {
   const [fix, setFix] = useState<GeoFix | null>(null); const [locating, setLocating] = useState(false);
   const install = useInstall();
 
-  const d: Day | undefined = week.find(x => x.day === today);
+  // A night shift that started yesterday is still "today's" shift until check-out.
+  const rec: Day | undefined = open && open.work_date !== today ? week.find(x => x.day === open.work_date) ?? ({ day: open.work_date, check_in: open.check_in, check_out: open.check_out, break_minutes: open.break_minutes ?? 0, wfh: open.wfh } as Day) : week.find(x => x.day === today);
+  const d = rec;
   const working = !!d?.check_in && !d?.check_out;
   const done = !!d?.check_out;
-  const worked = d?.check_in ? (d.check_out ? minutesBetween(d.check_in, d.check_out) : minutesBetween(d.check_in, now.toISOString())) : 0;
+  const brk = d?.break_minutes ?? 0;
+  const worked = d?.check_in ? Math.max(0, (d.check_out ? minutesBetween(d.check_in, d.check_out) : minutesBetween(d.check_in, now.toISOString())) - brk) : 0;
+  const [showMap, setShowMap] = useState(false); const [wfhOffer, setWfhOffer] = useState(false);
   const target = d?.kind === 'half_day_leave' ? schedule.half : schedule.required;
   const progress = Math.min(1, worked / target);
   const leftMin = Math.max(0, target - worked);
@@ -46,15 +50,16 @@ export function TodayPage() {
     setLocating(true); setErr(null);
     try { const f = await getPosition(); setFix(f); return f; } catch (e: any) { setErr(e.message); return null; } finally { setLocating(false); }
   }
-  async function punch() {
-    if (geo && !locationExplained()) { setPrimer(true); return; }
-    setBusy(true); setErr(null);
+  async function punch(opts: { wfh?: boolean; resume?: boolean } = {}) {
+    const needGeo = geo && !opts.wfh && !(working && d?.wfh);
+    if (needGeo && !locationExplained()) { setPrimer(true); return; }
+    setBusy(true); setErr(null); setWfhOffer(false);
     try {
       let f: GeoFix | null = null;
-      if (geo) { f = await locate(); if (!f) { setBusy(false); return; } }
-      const r = await backend.punch(working ? 'out' : 'in', f);
-      if (!r.ok) setErr(r.error ?? 'Punch refused');
-      else { toast(working ? 'Checked out. See you tomorrow.' : 'Checked in. Have a good day.'); reload(); }
+      if (needGeo) { f = await locate(); if (!f) { setBusy(false); setWfhOffer(!working && settings.allow_wfh); return; } }
+      const r = await backend.punch(working ? 'out' : 'in', f, { ...opts, resume: opts.resume || done });
+      if (!r.ok) { setErr(r.error ?? 'Punch refused'); setShowMap(true); setWfhOffer(!working && !!r.wfh_allowed); }
+      else { toast(working ? 'Checked out. See you tomorrow.' : opts.wfh ? 'Checked in — working from home.' : done ? 'Welcome back — break time not counted.' : 'Checked in. Have a good day.'); reload(); }
     } catch (e: any) { setErr(e.message); }
     setBusy(false);
   }
@@ -84,7 +89,7 @@ export function TodayPage() {
             <div className="center">
               {done
                 ? <div className="punch done" role="img" aria-label={`Worked ${fmtDuration(worked)}`}><span className="big num">{fmtDuration(worked)}</span><span className="sm">{progress >= 1 ? 'Target met' : `${fmtDuration(leftMin)} short`}</span></div>
-                : <button className={`punch ${working ? 'out' : ''}`} onClick={punch} disabled={busy}>
+                : <button className={`punch ${working ? 'out' : ''}`} onClick={() => punch()} disabled={busy}>
                     <span className="big">{busy ? (geo ? 'Locating…' : '…') : working ? 'Check out' : 'Check in'}</span>
                     <span className="sm num">{working ? `${fmtDuration(worked)} so far` : offDay ? (d!.holiday ?? (d!.kind === 'leave' ? 'On leave' : 'Day off')) : 'Tap to start'}</span>
                   </button>}
@@ -96,19 +101,22 @@ export function TodayPage() {
             <div><b>{Math.round(progress * 100)}%</b>of {+(target / 60).toFixed(1)}h</div>
           </div>
           {err && <div className="note bad" style={{ marginTop: 14, position: 'relative' }} role="alert"><Icon n="alert" />{err}</div>}
+          {wfhOffer && <button className="btn ghost block" style={{ marginTop: 10, position: 'relative' }} onClick={() => punch({ wfh: true })} disabled={busy}>Check in as working from home</button>}
+          {done && <button className="linkbtn" style={{ marginTop: 10, position: 'relative' }} onClick={() => punch({ resume: true })} disabled={busy}>Back after a break? Check in again</button>}
+          {(d?.wfh || brk > 0) && <p className="small muted" style={{ marginTop: 6, position: 'relative' }}>{d?.wfh ? 'Working from home today' : ''}{d?.wfh && brk > 0 ? ' · ' : ''}{brk > 0 ? `${fmtDuration(brk)} break not counted` : ''}</p>}
           {working && leftMin > 0 && <p className="small muted" style={{ marginTop: 8, position: 'relative' }}>Target reached at about {timeInTz(new Date(now.getTime() + leftMin * 60000).toISOString(), tz)}</p>}
           {schedule.custom && <p className="small muted" style={{ marginTop: 6, position: 'relative' }}>Your shift: from {schedule.shift_start.slice(0, 5)}, {fmtDuration(schedule.required)} a day</p>}
         </section>
 
         <div className="grid" style={{ alignContent: 'start' }}>
           {geo && <section className="card" data-tour="map">
-            <h2>Office area <small>check-in works inside the circle</small></h2>
-            <OfficeMap lat={settings.office_lat!} lng={settings.office_lng!} radius={settings.geofence_radius_m} me={fix} />
+            <h2>Office area <button className="linkbtn small" onClick={() => setShowMap(v => !v)}>{showMap || fix ? 'Hide map' : 'Show map'}</button></h2>
+            {(showMap || fix) && <OfficeMap lat={settings.office_lat!} lng={settings.office_lng!} radius={settings.geofence_radius_m} me={fix} />}
             <div className="geo-status">
               {fix ? <><span className="dot" style={{ background: inside ? 'var(--good)' : 'var(--bad)' }} />
                 {inside ? `You’re inside — ${dist} m from the office` : fix.accuracy > settings.max_gps_accuracy_m ? `GPS is too vague (±${Math.round(fix.accuracy)} m). Move near a window.` : `You’re ${dist} m away — need to be within ${settings.geofence_radius_m} m`}</>
-                : <span className="muted">Radius {settings.geofence_radius_m} m around the office.</span>}
-              <button className="btn ghost sm" style={{ marginLeft: 'auto' }} onClick={() => (locationExplained() ? locate() : setPrimer(true))} disabled={locating}><Icon n="pin" />{locating ? 'Finding you…' : 'Am I inside?'}</button>
+                : <span className="muted">Check-in works within {settings.geofence_radius_m} m of the office.</span>}
+              <button className="btn ghost sm" style={{ marginLeft: 'auto' }} onClick={() => (locationExplained() ? locate().then(() => setShowMap(true)) : setPrimer(true))} disabled={locating}><Icon n="pin" />{locating ? 'Finding you…' : 'Am I inside?'}</button>
             </div>
           </section>}
           <section className="card" data-tour="week">
@@ -134,15 +142,14 @@ export function TodayPage() {
               <div className="legend num">
                 <div><i style={{ background: C.orange }} />Met target<b>{s.fulfilled_days}</b></div>
                 <div><i style={{ background: C.orangeSoft }} />Below target<b>{s.unfulfilled_days}</b></div>
-                <div><i style={{ background: C.line }} />Late arrivals<b>{s.late_days}</b></div>
-                <div><i style={{ background: C.line }} />Leave left<b>{balance.remaining}</b></div>
+                <div className="plain">Late arrivals<b>{s.late_days}</b></div>
               </div>
             </div>
           </section>
         </div>
       </div>
     </div>
-    {primer && <LocationPrimer onCancel={() => setPrimer(false)} onOk={() => { setPrimer(false); punch(); }} />}
+    {primer && <LocationPrimer onCancel={() => setPrimer(false)} onOk={() => { setPrimer(false); punch({ resume: done }); }} />}
   </>;
 }
 
@@ -153,7 +160,7 @@ export function DayRow({ d, tz, onFix }: { d: Day; tz: string; onFix?: () => voi
       <div className="datechip"><b>{Number(d.day.slice(8))}</b><small>{new Date(d.day + 'T12:00:00Z').toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' })}</small></div>
       <div className="grow">
         <div className="ttl num">{d.check_in ? `${timeInTz(d.check_in, tz)} → ${timeInTz(d.check_out, tz)}` : d.holiday ?? (d.kind === 'weekend' ? 'Weekend' : '—')}</div>
-        <div className="sub num">{d.worked_minutes != null ? fmtDuration(d.worked_minutes) : ''}{d.late && <> · <span className="tag">Late</span></>}</div>
+        <div className="sub num">{d.worked_minutes != null ? fmtDuration(d.worked_minutes) : ''}{d.late && <> · <span className="tag">Late</span></>}{d.wfh && <> · <span className="tag">WFH</span></>}</div>
       </div>
       <div className="right row" style={{ gap: 8 }}>
         <Pill kind={d.kind} />
@@ -164,7 +171,11 @@ export function DayRow({ d, tz, onFix }: { d: Day; tz: string; onFix?: () => voi
 }
 
 export function HistoryPage() {
-  const { me, settings, today } = useApp(); const nav = useNavigate();
+  const { me, settings, today } = useApp(); const toast = useToast(); const loc = useLocation(); const nav = useNavigate();
+  const pre = new URLSearchParams(loc.search).get('date');
+  const [fixDate, setFixDate] = useState<string | null>(pre);
+  useEffect(() => { if (pre) setFixDate(pre); }, [pre]);
+  const fixes = useLoad(() => backend.corrections(me.id), [me.id]);
   const [ym, setYm] = useState(today.slice(0, 7));
   const [from, to] = monthRange(ym);
   const days = useLoad(() => backend.days(me.id, from, to), [me.id, ym]);
@@ -173,7 +184,7 @@ export function HistoryPage() {
   const s = sum.data;
   const list = (days.data ?? []).slice().reverse().filter(d => showOff || !['weekend', 'holiday'].includes(d.kind) || d.check_in);
   return <>
-    <Top title="History" sub="Your check-ins, hours and day status"><input className="input" type="month" value={ym} max={today.slice(0, 7)} onChange={e => e.target.value && setYm(e.target.value)} style={{ width: 170 }} aria-label="Month" /></Top>
+    <Top title="History" sub="Your days, hours and fix requests"><input className="input" type="month" value={ym} max={today.slice(0, 7)} onChange={e => e.target.value && setYm(e.target.value)} style={{ width: 170 }} aria-label="Month" /></Top>
     <div className="page">
       <div className="stats num">
         <div className="stat hot"><div className="v">{s ? fmtDuration(s.total_minutes).replace(/ \d+m$/, '') : '–'}<small>h</small></div><div className="l">Hours worked</div></div>
@@ -185,10 +196,13 @@ export function HistoryPage() {
       <section className="card">
         <h2>Days <label className="check small" style={{ margin: 0 }}><input type="checkbox" checked={showOff} onChange={e => setShowOff(e.target.checked)} />Show weekends & holidays</label></h2>
         {days.error && <div className="note bad">{days.error}</div>}
-        {list.length ? <div className="list">{list.map(d => <DayRow key={d.day} d={d} tz={settings.timezone} onFix={() => nav(`/fixes?date=${d.day}`)} />)}</div>
+        {list.length ? <div className="list">{list.map(d => <DayRow key={d.day} d={d} tz={settings.timezone} onFix={() => setFixDate(d.day)} />)}</div>
           : !days.loading && <Empty title="Nothing here yet">No working days recorded for this month.</Empty>}
+        <button className="linkbtn small" style={{ marginTop: 12 }} onClick={() => setFixDate(today)}>Wrong time on another day? Ask for a fix</button>
       </section>
+      {!!fixes.data?.length && <FixList list={fixes.data} />}
     </div>
+    {fixDate && <FixForm today={today} date={fixDate} onClose={() => { setFixDate(null); if (pre) nav('/history', { replace: true }); }} onDone={() => { setFixDate(null); fixes.reload(); toast('Fix request sent to your admin'); }} />}
   </>;
 }
 
@@ -199,22 +213,20 @@ export function LeavePage() {
   const { me, today } = useApp(); const toast = useToast();
   const leaves = useLoad(() => backend.leaves(me.id), [me.id]);
   const bal = useLoad(() => backend.balance(), [me.id]);
-  const [f, setF] = useState<'all' | 'pending' | 'approved' | 'rejected'>('all');
   const [open, setOpen] = useState(false);
   const b = bal.data;
-  const shown = (leaves.data ?? []).filter(l => f === 'all' || l.status === f);
+  const shown = (leaves.data ?? []).filter(l => l.status !== 'cancelled');
   return <>
-    <Top title="Leave" sub={`${new Date().getFullYear()} balance and requests`}><button className="btn primary" onClick={() => setOpen(true)}><Icon n="plus" />Apply for leave</button></Top>
+    <Top title="Leave" sub={`${today.slice(0, 4)} balance and requests`} />
     <div className="page">
-      <div className="stats num">
-        <div className="stat hot"><div className="v">{b?.remaining ?? '–'}</div><div className="l">Days remaining</div></div>
-        <div className="stat"><div className="v">{b?.used ?? '–'}</div><div className="l">Used (approved)</div></div>
-        <div className="stat"><div className="v">{b?.pending ?? '–'}</div><div className="l">Waiting for approval</div></div>
-        <div className="stat"><div className="v">{b?.annual ?? '–'}</div><div className="l">Yearly allowance</div></div>
-      </div>
-      {b && <div className="progress" aria-label="Leave used"><i style={{ width: `${pct(b.used, b.annual)}%` }} /></div>}
+      <section className="card leave-sum num">
+        <div className="row between"><div><div className="big">{b?.remaining ?? '–'}<small> of {b?.annual ?? '–'} days left</small></div>
+          <div className="small muted">{b ? `${b.used} used${b.pending ? ` · ${b.pending} waiting for approval` : ''}` : ' '}</div></div>
+          <button className="btn primary" onClick={() => setOpen(true)}><Icon n="plus" />Apply</button></div>
+        {b && <div className="progress" aria-label="Leave used"><i style={{ width: `${pct(b.used, b.annual)}%` }} /></div>}
+      </section>
       <section className="card">
-        <h2>Requests <Seg value={f} onChange={setF} options={[['all', 'All'], ['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected']]} /></h2>
+        <h2>Requests</h2>
         {shown.length ? <div className="list">{shown.map(l => (
           <div className="item" key={l.id}>
             <div className="grow">
@@ -235,9 +247,9 @@ export function LeavePage() {
 function LeaveForm({ today, onClose, onDone }: { today: string; onClose: () => void; onDone: () => void }) {
   const [start, setStart] = useState(addDays(today, 1)); const [end, setEnd] = useState(addDays(today, 1));
   const [type, setType] = useState<LeaveType>('casual'); const [half, setHalf] = useState(false); const [reason, setReason] = useState('');
-  const { settings } = useApp();
+  const { schedule } = useApp();
   const hol = useLoad(() => backend.holidays(), []);
-  const n = hol.data && end >= start ? countWorkingDays(start, half ? start : end, settings.weekend_mode, new Set(hol.data.map(h => h.holiday_date))) * (half ? 0.5 : 1) : null;
+  const n = hol.data && end >= start ? countWorkingDays(start, half ? start : end, schedule.weekend_mode, new Set(hol.data.map(h => h.holiday_date))) * (half ? 0.5 : 1) : null;
   return (
     <Modal title="Apply for leave" lede="Weekends and office holidays inside your dates are not counted." onClose={onClose}>
       <div className="two">
@@ -260,35 +272,25 @@ function LeaveForm({ today, onClose, onDone }: { today: string; onClose: () => v
 }
 
 // ═════════════ Fixes (correction requests) ═════════════
-export function FixesPage() {
-  const { me, today } = useApp(); const toast = useToast(); const loc = useLocation();
-  const pre = new URLSearchParams(loc.search).get('date');
-  const list = useLoad(() => backend.corrections(me.id), [me.id]);
-  const [open, setOpen] = useState(!!pre);
-  return <>
-    <Top title="Fixes" sub="Ask your admin to correct a check-in or check-out"><button className="btn primary" onClick={() => setOpen(true)}><Icon n="plus" />Request a fix</button></Top>
-    <div className="page">
-      <section className="card">
-        <h2>Your requests</h2>
-        {list.data?.length ? <div className="list">{list.data.map(c => (
-          <div className="item" key={c.id}>
-            <div className="datechip"><b>{Number(c.work_date.slice(8))}</b><small>{fmtDate(c.work_date, { month: 'short' })}</small></div>
-            <div className="grow">
-              <div className="ttl num">{c.requested_check_in && `In ${c.requested_check_in.slice(0, 5)}`}{c.requested_check_in && c.requested_check_out && ' · '}{c.requested_check_out && `Out ${c.requested_check_out.slice(0, 5)}`}</div>
-              <div className="sub">{c.reason}{c.admin_note && <> · <b>Admin:</b> {c.admin_note}</>}</div>
-            </div>
-            <StatusPill s={c.status} />
-          </div>))}</div> : !list.loading && <Empty title="No fix requests">Forgot to check out? Request a fix and your admin will review it.</Empty>}
-      </section>
-    </div>
-    {open && <FixForm today={today} date={pre ?? today} onClose={() => setOpen(false)} onDone={() => { setOpen(false); list.reload(); toast('Fix request sent'); }} />}
-  </>;
+function FixList({ list }: { list: import('../lib/types').Correction[] }) {
+  return <section className="card">
+    <h2>Fix requests</h2>
+    <div className="list">{list.map(c => (
+      <div className="item" key={c.id}>
+        <div className="datechip"><b>{Number(c.work_date.slice(8))}</b><small>{fmtDate(c.work_date, { month: 'short' })}</small></div>
+        <div className="grow">
+          <div className="ttl num">{c.requested_check_in && `In ${c.requested_check_in.slice(0, 5)}`}{c.requested_check_in && c.requested_check_out && ' · '}{c.requested_check_out && `Out ${c.requested_check_out.slice(0, 5)}`}</div>
+          <div className="sub">{c.reason}{c.admin_note && <> · <b>Admin:</b> {c.admin_note}</>}</div>
+        </div>
+        <StatusPill s={c.status} />
+      </div>))}</div>
+  </section>;
 }
 
 function FixForm({ today, date: d0, onClose, onDone }: { today: string; date: string; onClose: () => void; onDone: () => void }) {
   const [date, setDate] = useState(d0); const [tin, setIn] = useState(''); const [tout, setOut] = useState(''); const [reason, setReason] = useState('');
   return (
-    <Modal title="Request a fix" lede="Fill only the time that is wrong or missing. Times are office local time." onClose={onClose}>
+    <Modal title="Ask for a fix" lede="Fill only the time that is wrong or missing. Night shift? A check-out earlier than check-in counts as the next morning." onClose={onClose}>
       <label className="field"><span>Date</span><input className="input" type="date" max={today} min={addDays(today, -60)} value={date} onChange={e => setDate(e.target.value)} /></label>
       <div className="two">
         <label className="field"><span>Correct check-in</span><input className="input" type="time" value={tin} onChange={e => setIn(e.target.value)} /></label>
@@ -327,6 +329,7 @@ export function MePage() {
           <div className="item"><div className="grow">Weekly off</div><b>{{ sat_sun: 'Saturday & Sunday', sun: 'Sunday', none: 'None' }[schedule.weekend_mode]}</b></div>
           {settings.earliest_checkin && <div className="item"><div className="grow">Check-in opens</div><b>{settings.earliest_checkin.slice(0, 5)}</b></div>}
           <div className="item"><div className="grow">Location check</div><b>{settings.geofence_enabled ? `On (within ${settings.geofence_radius_m} m)` : 'Off'}</b></div>
+          {settings.allow_wfh && <div className="item"><div className="grow">Work from home</div><b>Allowed</b></div>}
         </div>
       </section>
       <section className="card">
@@ -338,7 +341,7 @@ export function MePage() {
         </div>
       </section>
       <section className="card">
-        <details className="about"><summary>About PunchIn <span className="muted small">v2.0</span></summary>
+        <details className="about"><summary>About PunchIn <span className="muted small">v2.1</span></summary>
           <p className="small muted" style={{ marginTop: 10 }}>Attendance, leave and hours for {settings.company_name}. Check-in times are recorded by the server and every change is kept in a tamper-evident audit log.</p>
           <p className="credit" style={{ marginTop: 8 }}>Developed by Hitesh Dubey</p>
         </details>
@@ -366,7 +369,7 @@ export function PrivacyPage({ standalone }: { standalone?: boolean }) {
     <h2>Who can see your data</h2>
     <p className="small" style={{ marginBottom: 12 }}>You see only your own records. Your office admins can see everyone’s attendance and leave. Data is stored in your organisation’s private Google Sheet, which is not shared with staff. Every change is logged in a tamper-evident audit trail.</p>
     <h2>Your rights</h2>
-    <p className="small">You can see all your records in History and Leave. To correct something, use Fixes. To have your account removed, ask your admin. Records are kept as long as your organisation needs them for attendance and payroll.</p>
+    <p className="small">You can see all your records in History and Leave. To correct something, tap Fix on that day in History. To have your account removed, ask your admin. Records are kept as long as your organisation needs them for attendance and payroll.</p>
     <p className="small muted" style={{ marginTop: 12 }}>Map tiles © OpenStreetMap contributors — loaded only when a map is shown.</p>
   </div>;
   if (standalone) return <><header className="top" style={{ padding: '24px 0 8px' }}><div><h1>Privacy</h1><p>Plain-language summary</p></div><a className="btn ghost" href="#/">Back</a></header>{body}</>;

@@ -75,6 +75,14 @@ Updating the server code later: paste the new `Code.js`, then **Deploy → Manag
 
 Free Google limits are far above what a small office needs: up to 30 people can use it at the same moment, and a sheet holds 10 million cells — over 100 years of records for a 20-person office.
 
+## Using PunchIn for another organisation
+
+The same app serves any number of offices. Each office keeps its own private Google Sheet — no office can see another's data, and sign-ins are kept separate on each phone.
+
+1. The new office's owner follows steps 1–4 above with their own Google account (their own sheet, their own web app).
+2. Their app link is `https://hiteshdubey007.github.io/Attendance-Tracker/?org=<the ID from their Web app URL>` — the long ID between `/s/` and `/exec`.
+3. They open that link, use their set-up code, and become that office's admin. Invite links they send from **People** automatically point at their office.
+
 ## Tech
 
 React + TypeScript (Vite) PWA · Supabase (PostgreSQL, Auth, row-level security) · Chart.js · Vitest · Playwright · GitHub Actions + Pages.

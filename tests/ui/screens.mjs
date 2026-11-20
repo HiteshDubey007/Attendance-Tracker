@@ -13,7 +13,7 @@ const screens = [
   ['login', '?signedout=1#/'],
   ['join', '?signedout=1#/join?e=aarav%40dotstudio.in&c=K7QM4XPA'], ['privacy', '?signedout=1#/privacy'],
   ['emp-today', '?as=employee#/today'], ['emp-history', '?as=employee#/history'], ['emp-leave', '?as=employee#/leave'],
-  ['emp-fixes', '?as=employee#/fixes'], ['emp-me', '?as=employee#/me'],
+  ['emp-me', '?as=employee#/me'],
   ['admin-overview', '?as=admin#/admin'], ['admin-people', '?as=admin#/admin/people'], ['admin-records', '?as=admin#/admin/records'],
   ['admin-approvals', '?as=admin#/admin/approvals'], ['admin-holidays', '?as=admin#/admin/holidays'],
   ['admin-settings', '?as=admin#/admin/settings'], ['admin-security', '?as=admin#/admin/security'], ['admin-more', '?as=admin#/more'], ['admin-announce', '?as=admin#/announce?date=2026-11-24'],
@@ -47,7 +47,7 @@ for (const [sizeName, vp] of Object.entries(sizes)) {
   await ctx.addInitScript(() => { for (const k of ['punchin.tour.employee.m1']) localStorage.setItem(k, '1'); });
   const page = await ctx.newPage();
   await page.goto(base + '?as=employee#/leave', { waitUntil: 'networkidle' });
-  await page.getByRole('button', { name: 'Apply for leave' }).click();
+  await page.getByRole('button', { name: 'Apply' }).click();
   await page.locator('input[type=date]').first().fill('2026-11-20');
   await page.locator('input[type=date]').nth(1).fill('2026-11-24');
   await page.waitForTimeout(300);
